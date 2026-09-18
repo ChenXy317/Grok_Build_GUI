@@ -12,7 +12,7 @@ export type ToolBlock = {
 }
 
 export type Block =
-  | { id: string; type: 'user'; text: string }
+  | { id: string; type: 'user'; text: string; pending?: boolean }
   | { id: string; type: 'assistant'; text: string }
   | { id: string; type: 'thought'; text: string; collapsed: boolean }
   | ToolBlock
@@ -40,19 +40,20 @@ function mergeTool(prev: ToolBlock, update: Record<string, unknown>): ToolBlock 
 }
 
 /** 将 ACP session/update 合并进对话块列表。 */
-export function applyUpdate(blocks: Block[], update: Record<string, unknown>, showThinking: boolean): Block[] {
+export function applyUpdate(blocks: Block[], update: Record<string, unknown>): Block[] {
   const kind = String(update.sessionUpdate ?? '')
 
   if (kind === 'user_message_chunk') {
+    const chunk = textOf(update)
     const last = blocks[blocks.length - 1]
     if (last?.type === 'user') {
-      return [...blocks.slice(0, -1), { ...last, text: last.text + textOf(update) }]
+      if (last.pending) return blocks
+      return [...blocks.slice(0, -1), { ...last, text: last.text + chunk }]
     }
-    return [...blocks, { id: uid(), type: 'user', text: textOf(update) }]
+    return [...blocks, { id: uid(), type: 'user', text: chunk }]
   }
 
   if (kind === 'agent_thought_chunk') {
-    if (!showThinking) return blocks
     const last = blocks[blocks.length - 1]
     if (last?.type === 'thought') {
       return [...blocks.slice(0, -1), { ...last, text: last.text + textOf(update), collapsed: false }]
@@ -107,8 +108,13 @@ export function applyUpdate(blocks: Block[], update: Record<string, unknown>, sh
   return blocks
 }
 
-export function applyHistory(history: Record<string, unknown>[], showThinking: boolean): Block[] {
-  return history.reduce<Block[]>((acc, update) => applyUpdate(acc, update, showThinking), [])
+export function applyHistory(history: Record<string, unknown>[]): Block[] {
+  return history.reduce<Block[]>((acc, update) => applyUpdate(acc, update), [])
+}
+
+export function formatAtPath(filePath: string): string {
+  if (/[\s"]/.test(filePath)) return `@"${filePath.replaceAll('"', '\\"')}"`
+  return `@${filePath}`
 }
 
 export function toolSummary(input?: Record<string, unknown>): string {

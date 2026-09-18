@@ -3,7 +3,7 @@ import Chat from './Chat'
 import Composer from './Composer'
 import PermissionModal from './PermissionModal'
 import Sidebar from './Sidebar'
-import { applyHistory, applyUpdate, folderName, type Block } from './blocks'
+import { applyHistory, applyUpdate, folderName, formatAtPath, type Block } from './blocks'
 import type {
   AppSettings,
   AuthInfo,
@@ -13,6 +13,19 @@ import type {
 } from '../../preload/index.d'
 
 type Phase = 'boot' | 'setup' | 'ready' | 'error'
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+async function waitQuiet(pending: Promise<unknown> | null): Promise<void> {
+  if (!pending) return
+  try {
+    await pending
+  } catch {
+    /* cancelled or superseded */
+  }
+}
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>('boot')
@@ -38,13 +51,23 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   const sessionRef = useRef<string | null>(null)
-  const thinkingRef = useRef(true)
+  const sendingRef = useRef(false)
+  const promptGen = useRef(0)
+  const promptWaitRef = useRef<Promise<unknown> | null>(null)
+  const sessionWaitRef = useRef<Promise<unknown> | null>(null)
+  const cwdRef = useRef('')
+  const yoloRef = useRef(false)
+  const modelRef = useRef(model)
 
-  const applySnapshot = useCallback((snap: SessionSnapshot, thinking: boolean) => {
+  cwdRef.current = cwd
+  yoloRef.current = yolo
+  modelRef.current = model
+
+  const applySnapshot = useCallback((snap: SessionSnapshot) => {
     sessionRef.current = snap.sessionId
     setSessionId(snap.sessionId)
     setCwd(snap.cwd)
-    setBlocks(applyHistory(snap.history ?? [], thinking))
+    setBlocks(applyHistory(snap.history ?? []))
     const available = snap.models?.availableModels ?? []
     if (available.length) setModels(available.map((m) => ({ modelId: m.modelId, name: m.name })))
     if (snap.models?.currentModelId) setModel(snap.models.currentModelId)
@@ -59,8 +82,24 @@ export default function App() {
     try {
       setSessions(await window.grok.listSessions())
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(errText(err))
     }
+  }, [])
+
+  const abortUiTurn = useCallback(async () => {
+    promptGen.current += 1
+    setPermission(null)
+    try {
+      await window.grok.cancel()
+    } catch {
+      /* cancel is best-effort */
+    }
+    await waitQuiet(promptWaitRef.current)
+    await waitQuiet(sessionWaitRef.current)
+    promptWaitRef.current = null
+    sessionWaitRef.current = null
+    sendingRef.current = false
+    setStreaming(false)
   }, [])
 
   const boot = useCallback(async () => {
@@ -71,7 +110,6 @@ export default function App() {
     setSettings(result.settings)
     setYolo(result.settings.yolo)
     setShowThinking(result.settings.showThinking)
-    thinkingRef.current = result.settings.showThinking
     setCwd(result.settings.lastCwd)
     if (result.settings.model) setModel(result.settings.model)
     if (result.models?.availableModels) {
@@ -97,13 +135,20 @@ export default function App() {
     const offUpdate = window.grok.on('session-update', (payload) => {
       const data = payload as { sessionId?: string; update: Record<string, unknown> }
       if (data.sessionId && sessionRef.current && data.sessionId !== sessionRef.current) return
-      setBlocks((prev) => applyUpdate(prev, data.update, thinkingRef.current))
+      setBlocks((prev) => applyUpdate(prev, data.update))
     })
     const offPerm = window.grok.on('permission', (payload) => {
-      setPermission(payload as PermissionRequest)
+      const req = payload as PermissionRequest
+      if (req.sessionId && sessionRef.current && req.sessionId !== sessionRef.current) {
+        void window.grok.respondPermission(req.rpcId, null)
+        return
+      }
+      setPermission(req)
     })
     const offExit = window.grok.on('agent-exit', (payload) => {
       const info = payload as { code: number | null; stderr: string }
+      sendingRef.current = false
+      promptWaitRef.current = null
       setStreaming(false)
       setError(`grok agent 已退出${info.code != null ? `（${info.code}）` : ''}${info.stderr ? `\n${info.stderr}` : ''}`)
       setPhase('error')
@@ -113,72 +158,141 @@ export default function App() {
       offPerm()
       offExit()
     }
-  }, [showThinking])
+  }, [])
 
-  const newSession = async (nextCwd = cwd) => {
+  const newSession = async (nextCwd = cwdRef.current) => {
     if (!nextCwd) return
-    setStreaming(false)
-    setPermission(null)
-    const snap = await window.grok.newSession({ cwd: nextCwd, yolo, model })
-    applySnapshot(snap, showThinking)
-    await refreshSessions()
+    try {
+      await abortUiTurn()
+      const op = window.grok.newSession({ cwd: nextCwd, yolo: yoloRef.current, model: modelRef.current })
+      sessionWaitRef.current = op
+      const snap = await op
+      applySnapshot(snap)
+      await refreshSessions()
+    } catch (err) {
+      setError(errText(err))
+    } finally {
+      sessionWaitRef.current = null
+    }
   }
 
   const openProject = async () => {
-    const folder = await window.grok.pickFolder()
-    if (!folder) return
-    setCwd(folder)
-    await newSession(folder)
+    try {
+      const folder = await window.grok.pickFolder()
+      if (!folder) return
+      setCwd(folder)
+      await newSession(folder)
+    } catch (err) {
+      setError(errText(err))
+    }
   }
 
   const loadSession = async (session: SessionInfo) => {
     if (!session.cwd) return
-    setStreaming(false)
-    setPermission(null)
-    const snap = await window.grok.loadSession({ sessionId: session.sessionId, cwd: session.cwd })
-    applySnapshot(snap, showThinking)
+    try {
+      await abortUiTurn()
+      const op = window.grok.loadSession({ sessionId: session.sessionId, cwd: session.cwd })
+      sessionWaitRef.current = op
+      const snap = await op
+      applySnapshot(snap)
+    } catch (err) {
+      setError(errText(err))
+    } finally {
+      sessionWaitRef.current = null
+    }
   }
 
   const send = async () => {
     const text = draft.trim()
-    if (!text || streaming) return
-    if (!sessionId) await newSession()
+    if (!text || sendingRef.current) return
+    sendingRef.current = true
+    const gen = ++promptGen.current
+    setError('')
     setDraft('')
     setStreaming(true)
     try {
-      await window.grok.prompt(text)
+      if (!sessionRef.current) {
+        const folder = cwdRef.current
+        if (!folder) throw new Error('先打开一个项目目录')
+        const op = window.grok.newSession({ cwd: folder, yolo: yoloRef.current, model: modelRef.current })
+        sessionWaitRef.current = op
+        const snap = await op
+        if (promptGen.current !== gen) return
+        sessionWaitRef.current = null
+        applySnapshot(snap)
+        await refreshSessions()
+      }
+      if (promptGen.current !== gen) return
+      setBlocks((prev) => {
+        const last = prev[prev.length - 1]
+        if (last?.type === 'user' && last.text === text) {
+          return last.pending ? prev : [...prev.slice(0, -1), { ...last, pending: true }]
+        }
+        return [...prev, { id: `u-${gen}`, type: 'user', text, pending: true }]
+      })
+      const run = window.grok.prompt(text)
+      promptWaitRef.current = run
+      await run
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (promptGen.current === gen) setError(errText(err))
     } finally {
-      setStreaming(false)
-      await refreshSessions()
+      if (promptWaitRef.current && promptGen.current === gen) promptWaitRef.current = null
+      if (promptGen.current === gen) {
+        setStreaming(false)
+        sendingRef.current = false
+        setBlocks((prev) => {
+          const last = prev[prev.length - 1]
+          if (last?.type === 'user' && last.pending) {
+            return [...prev.slice(0, -1), { ...last, pending: false }]
+          }
+          return prev
+        })
+        await refreshSessions()
+      }
     }
   }
 
   const attachFiles = async () => {
     const files = await window.grok.pickFiles()
     if (!files.length) return
-    const chips = files.map((f) => `@${f}`).join(' ')
+    const chips = files.map(formatAtPath).join(' ')
     setDraft((prev) => (prev ? `${prev} ${chips}` : chips))
   }
 
   const changeModel = async (value: string) => {
     setModel(value)
-    if (sessionId) await window.grok.setConfig('model', value)
-    await window.grok.setSettings({ model: value })
+    try {
+      if (sessionRef.current) await window.grok.setConfig('model', value)
+      await window.grok.setSettings({ model: value })
+    } catch (err) {
+      setError(errText(err))
+    }
   }
 
   const changeEffort = async (value: string) => {
     setEffort(value)
-    if (sessionId) await window.grok.setConfig('reasoning_effort', value)
+    try {
+      if (sessionRef.current) await window.grok.setConfig('reasoning_effort', value)
+    } catch (err) {
+      setError(errText(err))
+    }
   }
 
   const toggleYolo = async (value: boolean) => {
     setYolo(value)
-    await window.grok.setSettings({ yolo: value })
+    try {
+      await window.grok.setSettings({ yolo: value })
+    } catch (err) {
+      setError(errText(err))
+    }
   }
 
   const headerCwd = useMemo(() => (cwd ? folderName(cwd) : '未选择项目'), [cwd])
+  const grokPickLabel = window.grok.platform === 'win32' ? '选择 grok.exe' : '选择 grok'
+  const installHint =
+    window.grok.platform === 'win32'
+      ? '若尚未安装 CLI，可在 PowerShell 执行：irm https://x.ai/cli/install.ps1 | iex'
+      : '若尚未安装 CLI：curl -fsSL https://x.ai/cli/install.sh | bash'
 
   if (phase === 'boot') {
     return (
@@ -212,13 +326,13 @@ export default function App() {
                 await boot()
               }}
             >
-              选择 grok.exe
+              {grokPickLabel}
             </button>
             <button className="btn" onClick={() => void boot()}>
               重试
             </button>
           </div>
-          <p className="hint">若尚未安装 CLI，可在 PowerShell 执行：irm https://x.ai/cli/install.ps1 | iex</p>
+          <p className="hint">{installHint}</p>
         </div>
       </div>
     )
@@ -277,9 +391,18 @@ export default function App() {
               新会话始终批准
             </label>
           </div>
+          {error ? (
+            <div className="error-banner">
+              <span>{error}</span>
+              <button className="ghost" onClick={() => setError('')}>
+                关闭
+              </button>
+            </div>
+          ) : null}
           <Chat
             blocks={blocks}
             streaming={streaming}
+            showThinking={showThinking}
             emptyHint={cwd ? '给 Grok Build 下一条任务。它会读代码、改文件、跑命令。' : '先打开一个项目目录。'}
           />
           <Composer
@@ -290,7 +413,6 @@ export default function App() {
             onSend={() => void send()}
             onStop={() => {
               void window.grok.cancel()
-              setStreaming(false)
             }}
             onAttach={() => void attachFiles()}
           />
@@ -325,7 +447,6 @@ export default function App() {
                 type="checkbox"
                 checked={showThinking}
                 onChange={async (e) => {
-                  thinkingRef.current = e.target.checked
                   setShowThinking(e.target.checked)
                   await window.grok.setSettings({ showThinking: e.target.checked })
                 }}

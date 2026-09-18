@@ -14,6 +14,16 @@ function send(channel: string, payload: unknown): void {
   win?.webContents.send(channel, payload)
 }
 
+const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
+
+function isSafeExternalUrl(url: string): boolean {
+  try {
+    return EXTERNAL_PROTOCOLS.has(new URL(url).protocol)
+  } catch {
+    return false
+  }
+}
+
 function createWindow(): void {
   win = new BrowserWindow({
     width: 1320,
@@ -41,8 +51,11 @@ function createWindow(): void {
   })
 
   win.on('ready-to-show', () => win?.show())
+  win.on('closed', () => {
+    win = null
+  })
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    if (isSafeExternalUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
 
@@ -81,6 +94,12 @@ async function startAgent(): Promise<{
       settings
     }
   } catch (error) {
+    try {
+      await agent?.stop()
+    } catch {
+      /* already failed */
+    }
+    agent = null
     const message = error instanceof Error ? error.message : String(error)
     return {
       ok: false,
@@ -174,7 +193,10 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('open-path', (_e, target: string) => shell.openPath(target))
-  ipcMain.handle('open-external', (_e, url: string) => shell.openExternal(url))
+  ipcMain.handle('open-external', (_e, url: string) => {
+    if (typeof url !== 'string' || !isSafeExternalUrl(url)) return
+    return shell.openExternal(url)
+  })
 }
 
 app.whenReady().then(() => {
@@ -186,8 +208,14 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  if (process.platform === 'darwin') return
   void agent?.stop()
-  if (process.platform !== 'darwin') app.quit()
+  app.quit()
+})
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  else win?.show()
 })
 
 app.on('before-quit', () => {

@@ -64,6 +64,7 @@ export class GrokAgent {
   private collectingSession: string | null = null
   private permissionWaiters = new Map<string | number, (result: unknown) => void>()
   private started = false
+  private stopping = false
 
   sessionId: string | null = null
   cwd = homedir()
@@ -79,67 +80,97 @@ export class GrokAgent {
 
   async start(): Promise<{ auth: AuthInfo | null; agentVersion: string | null; models: SessionSnapshot['models'] | null }> {
     if (this.started) await this.stop()
-    this.proc = spawn(this.grokPath, ['agent', 'stdio'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-      env: {
-        ...process.env,
-        GROK_DISABLE_AUTOUPDATER: '1'
+    this.stopping = false
+    this.stderrTail = []
+    try {
+      const proc = spawn(this.grokPath, ['agent', 'stdio'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        env: {
+          ...process.env,
+          GROK_DISABLE_AUTOUPDATER: '1'
+        }
+      })
+      this.proc = proc
+
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error) => {
+          proc.off('spawn', onSpawn)
+          reject(err)
+        }
+        const onSpawn = () => {
+          proc.off('error', onError)
+          resolve()
+        }
+        proc.once('error', onError)
+        proc.once('spawn', onSpawn)
+      })
+
+      proc.stderr.setEncoding('utf8')
+      proc.stderr.on('data', (chunk: string) => {
+        for (const line of chunk.split(/\r?\n/)) {
+          if (!line.trim()) continue
+          this.stderrTail.push(line)
+          if (this.stderrTail.length > 80) this.stderrTail.shift()
+          this.events.log?.(line)
+        }
+      })
+
+      const fail = (error: Error, code: number | null = null): void => {
+        this.rpc?.shutdown(error)
+        if (!this.stopping) {
+          this.events.exit?.({ code, stderr: this.stderrTail.slice(-20).join('\n') || error.message })
+        }
       }
-    })
 
-    this.proc.stderr.setEncoding('utf8')
-    this.proc.stderr.on('data', (chunk: string) => {
-      for (const line of chunk.split(/\r?\n/)) {
-        if (!line.trim()) continue
-        this.stderrTail.push(line)
-        if (this.stderrTail.length > 80) this.stderrTail.shift()
-        this.events.log?.(line)
+      proc.on('error', (err) => fail(err))
+      proc.stdin.on('error', (err) => fail(err instanceof Error ? err : new Error(String(err))))
+      proc.on('exit', (code) => {
+        fail(new Error(`grok agent 退出 (${code ?? 'null'})`), code)
+        this.proc = null
+        this.rpc = null
+        this.started = false
+      })
+
+      this.rpc = new JsonRpc(
+        proc.stdin,
+        proc.stdout,
+        (msg) => this.handleRequest(msg),
+        (msg) => this.handleNotification(msg),
+        (line) => this.events.log?.(`非 JSON 输出: ${line.slice(0, 200)}`)
+      )
+      this.started = true
+
+      const init = (await this.rpc.request(
+        'initialize',
+        {
+          protocolVersion: 1,
+          clientInfo: { name: 'grok-build-gui', version: '0.1.0' },
+          clientCapabilities: {}
+        },
+        20000
+      )) as {
+        _meta?: { agentVersion?: string; modelState?: SessionSnapshot['models'] }
+        agentCapabilities?: unknown
       }
-    })
 
-    this.proc.on('exit', (code) => {
-      this.rpc?.shutdown(new Error(`grok agent 退出 (${code ?? 'null'})`))
-      this.events.exit?.({ code, stderr: this.stderrTail.slice(-20).join('\n') })
-      this.proc = null
-      this.rpc = null
-      this.started = false
-    })
+      this.agentVersion = init?._meta?.agentVersion ?? null
+      this.models = init?._meta?.modelState ?? null
 
-    this.rpc = new JsonRpc(
-      this.proc.stdin,
-      this.proc.stdout,
-      (msg) => this.handleRequest(msg),
-      (msg) => this.handleNotification(msg),
-      (line) => this.events.log?.(`非 JSON 输出: ${line.slice(0, 200)}`)
-    )
-
-    this.started = true
-
-    const init = (await this.rpc.request(
-      'initialize',
-      {
-        protocolVersion: 1,
-        clientInfo: { name: 'grok-build-gui', version: '0.1.0' },
-        clientCapabilities: {}
-      },
-      20000
-    )) as {
-      _meta?: { agentVersion?: string; modelState?: SessionSnapshot['models'] }
-      agentCapabilities?: unknown
+      const auth = (await this.rpc.request('authenticate', { methodId: 'cached_token' }, 15000)) as {
+        _meta?: AuthInfo
+      }
+      this.auth = auth?._meta ?? null
+      return { auth: this.auth, agentVersion: this.agentVersion, models: this.models }
+    } catch (error) {
+      await this.stop()
+      throw error
     }
-
-    this.agentVersion = init?._meta?.agentVersion ?? null
-    this.models = init?._meta?.modelState ?? null
-
-    const auth = (await this.rpc.request('authenticate', { methodId: 'cached_token' }, 15000)) as {
-      _meta?: AuthInfo
-    }
-    this.auth = auth?._meta ?? null
-    return { auth: this.auth, agentVersion: this.agentVersion, models: this.models }
   }
 
   async stop(): Promise<void> {
+    this.stopping = true
+    this.rejectPermissions()
     this.rpc?.shutdown()
     this.rpc = null
     if (this.proc && !this.proc.killed) {
@@ -148,7 +179,6 @@ export class GrokAgent {
     this.proc = null
     this.started = false
     this.sessionId = null
-    this.permissionWaiters.clear()
   }
 
   async listSessions(): Promise<SessionInfo[]> {
@@ -157,6 +187,7 @@ export class GrokAgent {
   }
 
   async newSession(opts: { cwd: string; yolo?: boolean; model?: string }): Promise<SessionSnapshot> {
+    this.abortTurn()
     this.cwd = opts.cwd
     const result = (await this.requireRpc().request(
       'session/new',
@@ -180,6 +211,7 @@ export class GrokAgent {
   }
 
   async loadSession(opts: { sessionId: string; cwd: string }): Promise<SessionSnapshot> {
+    this.abortTurn()
     this.cwd = opts.cwd
     this.collectingSession = opts.sessionId
     this.collector = []
@@ -214,12 +246,21 @@ export class GrokAgent {
   }
 
   cancel(): void {
-    if (!this.sessionId) return
-    this.requireRpc().notify('session/cancel', { sessionId: this.sessionId })
-    for (const [id, resolve] of this.permissionWaiters) {
-      resolve({ outcome: { outcome: 'cancelled' } })
-      this.permissionWaiters.delete(id)
+    this.abortTurn()
+  }
+
+  private abortTurn(): void {
+    if (this.sessionId && this.rpc) {
+      this.rpc.notify('session/cancel', { sessionId: this.sessionId })
     }
+    this.rejectPermissions()
+  }
+
+  private rejectPermissions(): void {
+    for (const [, resolve] of this.permissionWaiters) {
+      resolve({ outcome: { outcome: 'cancelled' } })
+    }
+    this.permissionWaiters.clear()
   }
 
   async setConfig(configId: string, value: string): Promise<unknown> {

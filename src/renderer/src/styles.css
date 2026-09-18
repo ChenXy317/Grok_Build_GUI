@@ -326,6 +326,22 @@ body {
 .field input { font-family: var(--mono); font-size: 12px; }
 .hint, .muted { color: var(--muted); font-size: 12px; }
 .error-text { color: var(--danger); white-space: pre-wrap; }
+.error-banner {
+  margin: 8px 18px 0;
+  padding: 8px 12px;
+  background: #3a1520;
+  color: #fecdd3;
+  border: 1px solid #7f1d1d;
+  border-radius: 8px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  white-space: pre-wrap;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.error-banner .ghost { padding: 2px 8px; font-size: 12px; }
 
 .md { line-height: 1.65; }
 .md p { margin: 0 0 10px; }

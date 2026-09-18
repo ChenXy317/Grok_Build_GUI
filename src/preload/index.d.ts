@@ -12,6 +12,7 @@ export type StartResult = {
 }
 
 export type GrokAPI = {
+  platform: NodeJS.Platform
   start: () => Promise<StartResult>
   listSessions: () => Promise<SessionInfo[]>
   newSession: (opts: { cwd: string; yolo?: boolean; model?: string }) => Promise<SessionSnapshot>

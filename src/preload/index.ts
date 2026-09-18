@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 const api = {
+  platform: process.platform,
   start: () => ipcRenderer.invoke('start'),
   listSessions: () => ipcRenderer.invoke('list-sessions'),
   newSession: (opts: { cwd: string; yolo?: boolean; model?: string }) => ipcRenderer.invoke('new-session', opts),

@@ -69,11 +69,13 @@ function ToolCard({ block }: { block: ToolBlock }) {
 export default function Chat({
   blocks,
   streaming,
-  emptyHint
+  emptyHint,
+  showThinking
 }: {
   blocks: Block[]
   streaming: boolean
   emptyHint: string
+  showThinking: boolean
 }) {
   const endRef = useRef<HTMLDivElement>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
@@ -103,6 +105,7 @@ export default function Chat({
           )
         }
         if (block.type === 'thought') {
+          if (!showThinking) return null
           return (
             <details key={block.id} className="thought" open={!block.collapsed}>
               <summary>思考过程</summary>

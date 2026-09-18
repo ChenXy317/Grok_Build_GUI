@@ -76,7 +76,11 @@ export class JsonRpc {
 
   private write(payload: unknown): void {
     if (this.closed) return
-    this.stdin.write(`${JSON.stringify(payload)}\n`)
+    try {
+      this.stdin.write(`${JSON.stringify(payload)}\n`)
+    } catch (error) {
+      this.shutdown(error instanceof Error ? error : new Error(String(error)))
+    }
   }
 
   private push(chunk: string): void {
@@ -106,8 +110,14 @@ export class JsonRpc {
       if (!pending) return
       this.pending.delete(Number(msg.id))
       if (pending.timer) clearTimeout(pending.timer)
-      if (msg.error) pending.reject(msg.error)
-      else pending.resolve(msg.result)
+      if (msg.error) {
+        const err = new Error(msg.error.message || 'ACP 错误')
+        err.name = 'JsonRpcError'
+        Object.assign(err, { code: msg.error.code, data: msg.error.data })
+        pending.reject(err)
+      } else {
+        pending.resolve(msg.result)
+      }
       return
     }
 
