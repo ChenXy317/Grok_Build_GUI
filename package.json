@@ -1,0 +1,33 @@
+{
+  "name": "grok-build-gui",
+  "productName": "Grok Build",
+  "version": "0.1.0",
+  "description": "Grok Build 桌面客户端，通过 ACP 连接本地 grok agent",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "author": "Grok Build GUI",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.13.5",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.3",
+    "electron": "^37.4.0",
+    "electron-vite": "^4.0.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.6"
+  }
+}
