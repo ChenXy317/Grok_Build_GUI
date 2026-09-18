@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, screen, shell } from 'electron'
 import { existsSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { GrokAgent, resolveGrokPath, type PromptPart, type SessionSnapshot } from './acp'
 import { deleteSessionDir, readSessionUsage, renameSessionDir } from './session-disk'
@@ -11,6 +11,7 @@ let agent: GrokAgent | null = null
 let settings: AppSettings
 let settingsFile = ''
 let persistTimer: ReturnType<typeof setTimeout> | null = null
+let pendingOpenFolder: string | null = null
 
 function send(channel: string, payload: unknown): void {
   win?.webContents.send(channel, payload)
@@ -35,11 +36,41 @@ function isSafeExternalUrl(url: string): boolean {
   }
 }
 
+function pathKey(p: string): string {
+  const n = resolve(p).replace(/[\\/]+$/, '')
+  return process.platform === 'win32' ? n.toLowerCase() : n
+}
+
+function clientRoots(): Set<string> {
+  const roots = [__dirname, join(__dirname, '..'), join(__dirname, '../..')]
+  try {
+    roots.push(app.getAppPath())
+  } catch {
+    /* app not ready */
+  }
+  try {
+    roots.push(dirname(process.execPath))
+  } catch {
+    /* ignore */
+  }
+  return new Set(roots.map(pathKey))
+}
+
 function folderFromArgv(argv: string[]): string | null {
-  for (const arg of argv.slice(1).reverse()) {
-    if (!arg || arg.startsWith('-') || arg.includes('electron') || arg.endsWith('.js') || arg.endsWith('.mjs')) continue
+  const args = argv.slice(1)
+  const dd = args.lastIndexOf('--')
+  const slice = dd >= 0 ? args.slice(dd + 1) : args
+  const skipSelf = dd < 0
+  const self = skipSelf ? clientRoots() : null
+  for (const arg of [...slice].reverse()) {
+    if (!arg || arg.startsWith('-')) continue
+    const lower = arg.toLowerCase()
+    if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.cjs') || lower.endsWith('.exe')) continue
     try {
-      if (existsSync(arg) && statSync(arg).isDirectory()) return arg
+      if (!existsSync(arg) || !statSync(arg).isDirectory()) continue
+      const resolved = resolve(arg)
+      if (self?.has(pathKey(resolved))) continue
+      return resolved
     } catch {
       /* skip */
     }
@@ -150,6 +181,8 @@ async function startAgent(): Promise<{
       update: (payload) => send('session-update', payload),
       permission: (req) => {
         send('permission', req)
+        if (settings.yolo) return
+        if (req.sessionId && agent?.sessionId && req.sessionId !== agent.sessionId) return
         const title = String(req.toolCall.title ?? '需要批准')
         showNotice('Grok Build', title)
       },
@@ -316,6 +349,12 @@ function registerIpc(): void {
     return result.response === 1
   })
 
+  ipcMain.handle('take-open-folder', () => {
+    const folder = pendingOpenFolder
+    pendingOpenFolder = null
+    return folder
+  })
+
   ipcMain.handle('get-settings', () => settings)
 
   ipcMain.handle('set-settings', (_e, patch: Partial<AppSettings>) => {
@@ -364,12 +403,9 @@ if (!gotLock) {
     app.setName('Grok Build')
     settingsFile = join(app.getPath('userData'), 'settings.json')
     settings = loadSettings(settingsFile, homedir())
+    pendingOpenFolder = folderFromArgv(process.argv)
     registerIpc()
     createWindow()
-    const folder = folderFromArgv(process.argv)
-    if (folder) {
-      win?.webContents.once('did-finish-load', () => send('open-folder', folder))
-    }
   })
 }
 

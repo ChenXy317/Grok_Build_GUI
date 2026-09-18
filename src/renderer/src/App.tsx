@@ -43,10 +43,12 @@ async function waitQuiet(pending: Promise<unknown> | null): Promise<void> {
 
 function allowOptionId(req: PermissionRequest): string | null {
   const options = req.options ?? []
+  const kindOf = (item: { kind?: string }) => String(item.kind ?? '')
   const match =
-    options.find((item) => String(item.kind ?? '') === 'allow_always') ??
-    options.find((item) => String(item.kind ?? '').startsWith('allow')) ??
-    options.find((item) => !String(item.kind ?? '').startsWith('reject')) ??
+    options.find((item) => kindOf(item) === 'allow_once') ??
+    options.find((item) => kindOf(item).startsWith('allow') && kindOf(item) !== 'allow_always') ??
+    options.find((item) => kindOf(item).startsWith('allow')) ??
+    options.find((item) => !kindOf(item).startsWith('reject')) ??
     options[0]
   return match?.optionId ?? null
 }
@@ -104,6 +106,7 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [compactUi, setCompactUi] = useState(false)
   const [fontScale, setFontScale] = useState(1)
+  const [promptImages, setPromptImages] = useState(false)
 
   const sessionRef = useRef<string | null>(null)
   const sendingRef = useRef(false)
@@ -112,6 +115,7 @@ export default function App() {
   const sessionWaitRef = useRef<Promise<unknown> | null>(null)
   const cwdRef = useRef('')
   const yoloRef = useRef(true)
+  const promptImagesRef = useRef(false)
   const modelRef = useRef(model)
   const draftRef = useRef('')
   const imagesRef = useRef<ImagePart[]>([])
@@ -122,6 +126,7 @@ export default function App() {
 
   cwdRef.current = cwd
   yoloRef.current = yolo
+  promptImagesRef.current = promptImages
   modelRef.current = model
   draftRef.current = draft
   imagesRef.current = images
@@ -312,6 +317,8 @@ export default function App() {
         if (result.models.currentModelId) setModel(result.models.currentModelId)
       }
       if (!result.ok) {
+        setPromptImages(false)
+        promptImagesRef.current = false
         setError(result.error || '无法启动 grok agent')
         if (splash) setPhase('setup')
         else setDisconnected(true)
@@ -319,8 +326,15 @@ export default function App() {
       }
       setAuth(result.auth)
       setAgentVersion(result.agentVersion)
+      setPromptImages(Boolean(result.promptImages))
+      promptImagesRef.current = Boolean(result.promptImages)
       setDisconnected(false)
       setPhase('ready')
+      const startupFolder = await window.grok.takeOpenFolder()
+      if (startupFolder) {
+        await openWorkspace(startupFolder)
+        return
+      }
       const list = await refreshSessions()
       if (!restore) return
       setRestoring(true)
@@ -350,7 +364,7 @@ export default function App() {
         setRestoring(false)
       }
     },
-    [loadSession, refreshSessions]
+    [loadSession, openWorkspace, refreshSessions]
   )
 
   useEffect(() => {
@@ -430,6 +444,16 @@ export default function App() {
   const addFiles = async (files: File[]) => {
     for (const file of files) {
       if (file.type.startsWith('image/')) {
+        if (!promptImagesRef.current) {
+          try {
+            const path = window.grok.getPathForFile(file)
+            if (path) attachPaths([path])
+            else setError('当前 agent 不支持粘贴图片')
+          } catch {
+            setError('当前 agent 不支持粘贴图片')
+          }
+          continue
+        }
         if (file.size > 4_000_000) {
           setError('图片超过 4MB')
           continue
@@ -486,8 +510,13 @@ export default function App() {
       }
       const parts: PromptPart[] = []
       if (text) parts.push({ type: 'text', text })
-      for (const img of extraImages) parts.push({ type: 'image', mimeType: img.mimeType, data: img.data })
-      const run = window.grok.prompt(parts.length ? parts : [{ type: 'text', text: '' }])
+      const imagesToSend = promptImagesRef.current ? extraImages : []
+      if (extraImages.length && !promptImagesRef.current) {
+        setError('当前 agent 不支持图片，已只发送文字')
+      }
+      for (const img of imagesToSend) parts.push({ type: 'image', mimeType: img.mimeType, data: img.data })
+      if (!parts.length) return
+      const run = window.grok.prompt(parts)
       promptWaitRef.current = run
       const result = await run
       if (promptGen.current === gen) setStopReason(result?.stopReason ?? '')
@@ -570,7 +599,11 @@ export default function App() {
       return true
     }
     if (key === 'compact') {
-      void sendText(`/compact${rest ? ` ${rest}` : ''}`, ++promptGen.current)
+      void (async () => {
+        await abortUiTurn()
+        sendingRef.current = true
+        await sendText(`/compact${rest ? ` ${rest}` : ''}`, ++promptGen.current)
+      })()
       return true
     }
     return false
@@ -640,13 +673,15 @@ export default function App() {
     if (!ok) return
     try {
       await window.grok.deleteSession(session.sessionId)
-      if (sessionRef.current === session.sessionId) {
+      const wasCurrent = sessionRef.current === session.sessionId
+      if (wasCurrent) {
         sessionRef.current = null
         setSessionId(null)
         setBlocks([])
         setUsage(null)
       }
       await refreshSessions()
+      if (wasCurrent && cwdRef.current) await newSession(cwdRef.current)
     } catch (err) {
       setError(errText(err))
     }
@@ -728,12 +763,12 @@ export default function App() {
         else if (findOpen) {
           setFindOpen(false)
           setFind('')
-        } else if (streaming) void window.grok.cancel()
+        } else if (streaming) void abortUiTurn()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [exportChat, findOpen, logsOpen, newSession, openProject, settingsOpen, sidebarCollapsed, streaming])
+  }, [abortUiTurn, exportChat, findOpen, logsOpen, newSession, openProject, settingsOpen, sidebarCollapsed, streaming])
 
   const headerCwd = useMemo(() => (cwd ? folderName(cwd) : '桌面客户端'), [cwd])
   const grokPickLabel = window.grok.platform === 'win32' ? '选择 grok.exe' : '选择 grok'
@@ -920,14 +955,13 @@ export default function App() {
             queue={queue}
             placeholder={
               cwd
-                ? '给 Grok Build 下任务。Enter 发送，/ 打开命令，可粘贴图片。'
+                ? promptImages
+                  ? '给 Grok Build 下任务。Enter 发送，/ 打开命令，可粘贴图片。'
+                  : '给 Grok Build 下任务。Enter 发送，/ 打开命令。'
                 : '输入任务后会选择项目，或把文件夹拖进窗口。'
             }
             onSend={() => void send()}
-            onStop={() => {
-              setQueue([])
-              void window.grok.cancel()
-            }}
+            onStop={() => void abortUiTurn()}
             onAttach={() => void attachFiles()}
             onCommand={runCommand}
             onPasteFiles={(files) => void addFiles(files)}

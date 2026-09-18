@@ -1,6 +1,14 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { PromptPart } from '../main/acp'
 
+const openFolderBuffered: unknown[] = []
+let openFolderHandler: ((payload: unknown) => void) | null = null
+
+ipcRenderer.on('open-folder', (_event, payload) => {
+  if (openFolderHandler) openFolderHandler(payload)
+  else openFolderBuffered.push(payload)
+})
+
 const api = {
   platform: process.platform,
   start: () => ipcRenderer.invoke('start'),
@@ -20,6 +28,7 @@ const api = {
   pickGrok: () => ipcRenderer.invoke('pick-grok'),
   saveText: (opts: { title?: string; defaultName?: string; content: string }) => ipcRenderer.invoke('save-text', opts),
   confirm: (opts: { message: string; detail?: string; ok?: string }) => ipcRenderer.invoke('confirm', opts),
+  takeOpenFolder: () => ipcRenderer.invoke('take-open-folder') as Promise<string | null>,
   getSettings: () => ipcRenderer.invoke('get-settings'),
   setSettings: (patch: Record<string, unknown>) => ipcRenderer.invoke('set-settings', patch),
   openPath: (target: string) => ipcRenderer.invoke('open-path', target),
@@ -31,6 +40,14 @@ const api = {
   on: (channel: string, handler: (payload: unknown) => void) => {
     const allowed = new Set(['session-update', 'permission', 'agent-exit', 'agent-log', 'open-folder'])
     if (!allowed.has(channel)) return () => undefined
+    if (channel === 'open-folder') {
+      openFolderHandler = handler
+      const queued = openFolderBuffered.splice(0)
+      for (const payload of queued) handler(payload)
+      return () => {
+        if (openFolderHandler === handler) openFolderHandler = null
+      }
+    }
     const wrapped = (_event: unknown, payload: unknown) => handler(payload)
     ipcRenderer.on(channel, wrapped)
     return () => ipcRenderer.removeListener(channel, wrapped)

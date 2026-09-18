@@ -40,6 +40,7 @@ export type GrokAPI = {
   pickGrok: () => Promise<string | null>
   saveText: (opts: { title?: string; defaultName?: string; content: string }) => Promise<string | null>
   confirm: (opts: { message: string; detail?: string; ok?: string }) => Promise<boolean>
+  takeOpenFolder: () => Promise<string | null>
   getSettings: () => Promise<AppSettings>
   setSettings: (patch: Partial<AppSettings>) => Promise<AppSettings>
   openPath: (target: string) => Promise<string>

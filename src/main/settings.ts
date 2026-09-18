@@ -74,7 +74,10 @@ export function saveSettings(file: string, settings: AppSettings): void {
 }
 
 function samePath(a: string, b: string): boolean {
-  const n = (p: string) => p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase()
+  const n = (p: string) => {
+    const s = p.replace(/[\\/]+$/, '').replace(/\\/g, '/')
+    return process.platform === 'win32' ? s.toLowerCase() : s
+  }
   return n(a) === n(b)
 }
 

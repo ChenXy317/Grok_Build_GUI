@@ -355,7 +355,8 @@ export class GrokAgent {
     }
     if (msg.method === 'fs/write_text_file') {
       const params = (msg.params ?? {}) as { path?: string; content?: string }
-      return writeTextFile(String(params.path ?? ''), String(params.content ?? ''))
+      const grokHome = process.env.GROK_HOME || join(homedir(), '.grok')
+      return writeTextFile(String(params.path ?? ''), String(params.content ?? ''), [this.cwd, grokHome])
     }
     throw new Error(`未实现的客户端方法: ${msg.method}`)
   }

@@ -25,7 +25,13 @@ if not exist "node_modules\" (
   )
 )
 
-if not exist "out\main\index.js" (
+set "NEED_BUILD=0"
+if not exist "out\main\index.js" set "NEED_BUILD=1"
+if "%NEED_BUILD%"=="0" (
+  node --input-type=commonjs -e "try{const fs=require('fs');const p=require('path');function mt(f){try{return fs.statSync(f).mtimeMs}catch{return 0}}function walk(d){let m=0;for(const n of fs.readdirSync(d)){const f=p.join(d,n);m=Math.max(m,fs.statSync(f).isDirectory()?walk(f):mt(f))}return m}const out=mt('out/main/index.js');process.exit(!out||Math.max(walk('src'),mt('package.json'),mt('electron.vite.config.ts'))>out?1:0)}catch{process.exit(1)}"
+  if errorlevel 1 set "NEED_BUILD=1"
+)
+if "%NEED_BUILD%"=="1" (
   echo 正在构建...
   call npm run build
   if errorlevel 1 (
@@ -46,5 +52,5 @@ if not exist "%ELECTRON%" (
   )
 )
 
-start "" "%ELECTRON%" "%cd%" %*
+start "" "%ELECTRON%" "%cd%" -- %*
 exit /b 0

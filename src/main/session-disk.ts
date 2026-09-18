@@ -1,18 +1,49 @@
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+
+const SESSION_ID_RE = /^[\w.-]+$/
 
 function sessionsRoot(): string {
   return join(process.env.GROK_HOME || join(homedir(), '.grok'), 'sessions')
 }
 
+function isSafeSessionId(sessionId: string): boolean {
+  return Boolean(sessionId) && SESSION_ID_RE.test(sessionId) && !sessionId.includes('..') && sessionId !== '.'
+}
+
+function pathKey(p: string): string {
+  const n = resolve(p)
+  return process.platform === 'win32' ? n.toLowerCase() : n
+}
+
+function isInside(root: string, dir: string): boolean {
+  const a = pathKey(root)
+  const b = pathKey(dir)
+  const rel = relative(a, b)
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+}
+
 function findSessionDir(sessionId: string): string | null {
+  if (!isSafeSessionId(sessionId)) return null
   const root = sessionsRoot()
-  if (!existsSync(root) || !sessionId) return null
+  if (!existsSync(root)) return null
+  let realRoot: string
+  try {
+    realRoot = realpathSync(root)
+  } catch {
+    return null
+  }
   for (const group of readdirSync(root, { withFileTypes: true })) {
     if (!group.isDirectory()) continue
     const dir = join(root, group.name, sessionId)
-    if (existsSync(join(dir, 'summary.json'))) return dir
+    if (!existsSync(join(dir, 'summary.json'))) continue
+    try {
+      const real = realpathSync(dir)
+      if (isInside(realRoot, real)) return real
+    } catch {
+      /* skip */
+    }
   }
   return null
 }

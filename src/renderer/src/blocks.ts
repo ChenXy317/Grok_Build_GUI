@@ -136,10 +136,14 @@ export function folderName(cwd: string): string {
   return parts[parts.length - 1] || cwd
 }
 
-/** Windows 下忽略斜杠与大小写差异。 */
+/** 统一斜杠；仅 Windows 忽略大小写。 */
 export function samePath(a?: string | null, b?: string | null): boolean {
   if (!a || !b) return false
-  const n = (p: string) => p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase()
+  const win = typeof window !== 'undefined' && window.grok?.platform === 'win32'
+  const n = (p: string) => {
+    const s = p.replace(/[\\/]+$/, '').replace(/\\/g, '/')
+    return win ? s.toLowerCase() : s
+  }
   return n(a) === n(b)
 }
 
