@@ -1,17 +1,28 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { existsSync } from 'node:fs'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, screen, shell } from 'electron'
+import { existsSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { GrokAgent, resolveGrokPath, type SessionSnapshot } from './acp'
-import { loadSettings, saveSettings, type AppSettings } from './settings'
+import { GrokAgent, resolveGrokPath, type PromptPart, type SessionSnapshot } from './acp'
+import { deleteSessionDir, readSessionUsage, renameSessionDir } from './session-disk'
+import { loadSettings, rememberWorkspace, saveSettings, type AppSettings } from './settings'
 
 let win: BrowserWindow | null = null
 let agent: GrokAgent | null = null
 let settings: AppSettings
 let settingsFile = ''
+let persistTimer: ReturnType<typeof setTimeout> | null = null
 
 function send(channel: string, payload: unknown): void {
   win?.webContents.send(channel, payload)
+}
+
+function persist(): void {
+  saveSettings(settingsFile, settings)
+}
+
+function persistSoon(): void {
+  if (persistTimer) clearTimeout(persistTimer)
+  persistTimer = setTimeout(persist, 400)
 }
 
 const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
@@ -24,12 +35,57 @@ function isSafeExternalUrl(url: string): boolean {
   }
 }
 
+function folderFromArgv(argv: string[]): string | null {
+  for (const arg of argv.slice(1).reverse()) {
+    if (!arg || arg.startsWith('-') || arg.includes('electron') || arg.endsWith('.js') || arg.endsWith('.mjs')) continue
+    try {
+      if (existsSync(arg) && statSync(arg).isDirectory()) return arg
+    } catch {
+      /* skip */
+    }
+  }
+  return null
+}
+
+function preloadPath(): string {
+  const mjs = join(__dirname, '../preload/index.mjs')
+  return existsSync(mjs) ? mjs : join(__dirname, '../preload/index.js')
+}
+
+function visibleBounds(): { x?: number; y?: number; width: number; height: number; isMaximized?: boolean } {
+  const saved = settings.windowBounds
+  const width = saved?.width || 1320
+  const height = saved?.height || 860
+  if (saved?.x == null || saved?.y == null) return { width, height, isMaximized: saved?.isMaximized }
+  const area = screen.getDisplayMatching({ x: saved.x, y: saved.y, width, height }).workArea
+  const x = Math.min(Math.max(saved.x, area.x), area.x + area.width - 200)
+  const y = Math.min(Math.max(saved.y, area.y), area.y + area.height - 160)
+  return { x, y, width, height, isMaximized: saved.isMaximized }
+}
+
+function trackWindow(window: BrowserWindow): void {
+  const save = (): void => {
+    if (window.isDestroyed()) return
+    const isMaximized = window.isMaximized()
+    if (!isMaximized) settings.windowBounds = { ...window.getBounds(), isMaximized: false }
+    else settings.windowBounds = { ...(settings.windowBounds ?? window.getBounds()), isMaximized: true }
+    persistSoon()
+  }
+  window.on('resize', save)
+  window.on('move', save)
+  window.on('maximize', save)
+  window.on('unmaximize', save)
+}
+
 function createWindow(): void {
+  const bounds = visibleBounds()
   win = new BrowserWindow({
-    width: 1320,
-    height: 860,
-    minWidth: 980,
-    minHeight: 640,
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: bounds.y,
+    minWidth: 860,
+    minHeight: 560,
     backgroundColor: '#0c0c0f',
     title: 'Grok Build',
     show: false,
@@ -41,15 +97,15 @@ function createWindow(): void {
       height: 36
     },
     webPreferences: {
-      preload: join(__dirname, existsSync(join(__dirname, '../preload/index.mjs'))
-        ? '../preload/index.mjs'
-        : '../preload/index.js'),
+      preload: preloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
     }
   })
 
+  if (bounds.isMaximized) win.maximize()
+  trackWindow(win)
   win.on('ready-to-show', () => win?.show())
   win.on('closed', () => {
     win = null
@@ -66,6 +122,16 @@ function createWindow(): void {
   }
 }
 
+function showNotice(title: string, body: string): void {
+  if (win?.isFocused()) return
+  try {
+    new Notification({ title, body }).show()
+  } catch {
+    /* notifications optional */
+  }
+  win?.flashFrame(true)
+}
+
 async function startAgent(): Promise<{
   ok: boolean
   error?: string
@@ -74,13 +140,19 @@ async function startAgent(): Promise<{
   agentVersion: string | null
   models: SessionSnapshot['models'] | null
   settings: AppSettings
+  canDeleteSession: boolean
+  promptImages: boolean
 }> {
   const grokPath = resolveGrokPath(settings.grokPath || null)
   try {
     await agent?.stop()
     agent = new GrokAgent(grokPath, {
       update: (payload) => send('session-update', payload),
-      permission: (req) => send('permission', req),
+      permission: (req) => {
+        send('permission', req)
+        const title = String(req.toolCall.title ?? '需要批准')
+        showNotice('Grok Build', title)
+      },
       exit: (info) => send('agent-exit', info),
       log: (line) => send('agent-log', line)
     })
@@ -91,7 +163,9 @@ async function startAgent(): Promise<{
       auth: info.auth,
       agentVersion: info.agentVersion,
       models: info.models,
-      settings
+      settings,
+      canDeleteSession: info.canDeleteSession,
+      promptImages: info.promptImages
     }
   } catch (error) {
     try {
@@ -108,7 +182,9 @@ async function startAgent(): Promise<{
       auth: null,
       agentVersion: null,
       models: null,
-      settings
+      settings,
+      canDeleteSession: false,
+      promptImages: false
     }
   }
 }
@@ -123,21 +199,27 @@ function registerIpc(): void {
 
   ipcMain.handle('new-session', async (_e, opts: { cwd: string; yolo?: boolean; model?: string }) => {
     if (!agent) throw new Error('尚未连接 agent')
-    settings.lastCwd = opts.cwd
-    saveSettings(settingsFile, settings)
-    return await agent.newSession({ cwd: opts.cwd, yolo: opts.yolo ?? settings.yolo, model: opts.model ?? settings.model })
+    const snap = await agent.newSession({
+      cwd: opts.cwd,
+      yolo: opts.yolo ?? settings.yolo,
+      model: opts.model ?? settings.model
+    })
+    settings = rememberWorkspace(settings, opts.cwd, snap.sessionId)
+    persist()
+    return snap
   })
 
   ipcMain.handle('load-session', async (_e, opts: { sessionId: string; cwd: string }) => {
     if (!agent) throw new Error('尚未连接 agent')
-    settings.lastCwd = opts.cwd
-    saveSettings(settingsFile, settings)
-    return await agent.loadSession(opts)
+    const snap = await agent.loadSession(opts)
+    settings = rememberWorkspace(settings, opts.cwd, opts.sessionId)
+    persist()
+    return snap
   })
 
-  ipcMain.handle('prompt', async (_e, text: string) => {
+  ipcMain.handle('prompt', async (_e, parts: PromptPart[]) => {
     if (!agent) throw new Error('尚未连接 agent')
-    return await agent.prompt(text)
+    return await agent.prompt(Array.isArray(parts) ? parts : [{ type: 'text', text: String(parts) }])
   })
 
   ipcMain.handle('cancel', () => {
@@ -148,7 +230,7 @@ function registerIpc(): void {
     if (!agent) throw new Error('尚未连接 agent')
     if (configId === 'model') {
       settings.model = value
-      saveSettings(settingsFile, settings)
+      persist()
     }
     return await agent.setConfig(configId, value)
   })
@@ -156,6 +238,33 @@ function registerIpc(): void {
   ipcMain.handle('respond-permission', (_e, rpcId: number | string, optionId: string | null) => {
     agent?.resolvePermission(rpcId, optionId)
   })
+
+  ipcMain.handle('delete-session', async (_e, sessionId: string) => {
+    if (!sessionId) throw new Error('缺少会话')
+    let deleted = false
+    if (agent?.canDeleteSession) {
+      try {
+        await agent.deleteSession(sessionId)
+        deleted = true
+      } catch {
+        /* fall back to disk */
+      }
+    }
+    if (!deleted) deleted = deleteSessionDir(sessionId)
+    if (!deleted) throw new Error('无法删除该会话')
+    if (settings.lastSessionId === sessionId) {
+      settings.lastSessionId = ''
+      persist()
+    }
+    return true
+  })
+
+  ipcMain.handle('rename-session', (_e, sessionId: string, title: string) => {
+    if (!renameSessionDir(sessionId, title)) throw new Error('无法重命名该会话')
+    return true
+  })
+
+  ipcMain.handle('session-usage', (_e, sessionId: string) => readSessionUsage(sessionId))
 
   ipcMain.handle('pick-folder', async () => {
     const result = await dialog.showOpenDialog(win!, {
@@ -184,28 +293,85 @@ function registerIpc(): void {
     return result.canceled ? null : result.filePaths[0]
   })
 
+  ipcMain.handle('save-text', async (_e, opts: { title?: string; defaultName?: string; content: string }) => {
+    const result = await dialog.showSaveDialog(win!, {
+      title: opts.title || '导出',
+      defaultPath: join(settings.lastCwd || homedir(), opts.defaultName || 'conversation.md'),
+      filters: [{ name: 'Markdown', extensions: ['md'] }]
+    })
+    if (result.canceled || !result.filePath) return null
+    writeFileSync(result.filePath, opts.content, 'utf8')
+    return result.filePath
+  })
+
+  ipcMain.handle('confirm', async (_e, opts: { message: string; detail?: string; ok?: string }) => {
+    const result = await dialog.showMessageBox(win!, {
+      type: 'warning',
+      buttons: ['取消', opts.ok || '确定'],
+      defaultId: 0,
+      cancelId: 0,
+      message: opts.message,
+      detail: opts.detail || ''
+    })
+    return result.response === 1
+  })
+
   ipcMain.handle('get-settings', () => settings)
 
   ipcMain.handle('set-settings', (_e, patch: Partial<AppSettings>) => {
     settings = { ...settings, ...patch }
-    saveSettings(settingsFile, settings)
+    persist()
     return settings
   })
 
   ipcMain.handle('open-path', (_e, target: string) => shell.openPath(target))
+  ipcMain.handle('reveal-path', (_e, target: string) => {
+    if (typeof target === 'string' && target) shell.showItemInFolder(target)
+  })
+  ipcMain.handle('clipboard-write', (_e, text: string) => {
+    if (typeof text === 'string') clipboard.writeText(text)
+  })
   ipcMain.handle('open-external', (_e, url: string) => {
     if (typeof url !== 'string' || !isSafeExternalUrl(url)) return
     return shell.openExternal(url)
   })
+
+  ipcMain.handle('path-kind', (_e, target: string) => {
+    if (typeof target !== 'string' || !target) return null
+    try {
+      return statSync(target).isDirectory() ? 'dir' : 'file'
+    } catch {
+      return existsSync(target) ? 'file' : null
+    }
+  })
 }
 
-app.whenReady().then(() => {
-  app.setName('Grok Build')
-  settingsFile = join(app.getPath('userData'), 'settings.json')
-  settings = loadSettings(settingsFile, homedir())
-  registerIpc()
-  createWindow()
-})
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on('second-instance', (_e, argv) => {
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    }
+    const folder = folderFromArgv(argv)
+    if (folder) send('open-folder', folder)
+  })
+
+  app.whenReady().then(() => {
+    app.setName('Grok Build')
+    settingsFile = join(app.getPath('userData'), 'settings.json')
+    settings = loadSettings(settingsFile, homedir())
+    registerIpc()
+    createWindow()
+    const folder = folderFromArgv(process.argv)
+    if (folder) {
+      win?.webContents.once('did-finish-load', () => send('open-folder', folder))
+    }
+  })
+}
 
 app.on('window-all-closed', () => {
   if (process.platform === 'darwin') return
@@ -219,5 +385,7 @@ app.on('activate', () => {
 })
 
 app.on('before-quit', () => {
+  if (persistTimer) clearTimeout(persistTimer)
+  if (settingsFile && settings) persist()
   void agent?.stop()
 })

@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { readTextFile, writeTextFile } from './client-fs'
 import { JsonRpc, type JsonRpcMessage } from './jsonrpc'
 
 export type ConfigOption = {
@@ -46,6 +47,22 @@ export type PermissionRequest = {
   options: { optionId: string; name: string; kind?: string }[]
 }
 
+export type PromptPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mimeType: string; data: string }
+
+export type AgentCapabilities = {
+  loadSession?: boolean
+  promptCapabilities?: { image?: boolean; audio?: boolean; embeddedContext?: boolean }
+  sessionCapabilities?: { list?: unknown; delete?: unknown }
+}
+
+export type SlashCommand = {
+  name: string
+  description?: string
+  input?: { hint?: string }
+}
+
 type AcpEvents = {
   update: (payload: { sessionId?: string; method: string; update: Record<string, unknown> }) => void
   permission: (req: PermissionRequest) => void
@@ -72,13 +89,22 @@ export class GrokAgent {
   agentVersion: string | null = null
   models: SessionSnapshot['models'] | null = null
   configOptions: ConfigOption[] = []
+  capabilities: AgentCapabilities | null = null
+  canDeleteSession = false
+  promptImages = false
 
   constructor(
     private readonly grokPath: string,
     private readonly events: Partial<AcpEvents> = {}
   ) {}
 
-  async start(): Promise<{ auth: AuthInfo | null; agentVersion: string | null; models: SessionSnapshot['models'] | null }> {
+  async start(): Promise<{
+    auth: AuthInfo | null
+    agentVersion: string | null
+    models: SessionSnapshot['models'] | null
+    canDeleteSession: boolean
+    promptImages: boolean
+  }> {
     if (this.started) await this.stop()
     this.stopping = false
     this.stderrTail = []
@@ -145,23 +171,35 @@ export class GrokAgent {
         'initialize',
         {
           protocolVersion: 1,
-          clientInfo: { name: 'grok-build-gui', version: '0.1.0' },
-          clientCapabilities: {}
+          clientInfo: { name: 'grok-build-gui', title: 'Grok Build', version: '0.2.0' },
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+            terminal: false
+          }
         },
         20000
       )) as {
         _meta?: { agentVersion?: string; modelState?: SessionSnapshot['models'] }
-        agentCapabilities?: unknown
+        agentCapabilities?: AgentCapabilities
       }
 
       this.agentVersion = init?._meta?.agentVersion ?? null
       this.models = init?._meta?.modelState ?? null
+      this.capabilities = init?.agentCapabilities ?? null
+      this.canDeleteSession = Boolean(init?.agentCapabilities?.sessionCapabilities?.delete)
+      this.promptImages = Boolean(init?.agentCapabilities?.promptCapabilities?.image)
 
       const auth = (await this.rpc.request('authenticate', { methodId: 'cached_token' }, 15000)) as {
         _meta?: AuthInfo
       }
       this.auth = auth?._meta ?? null
-      return { auth: this.auth, agentVersion: this.agentVersion, models: this.models }
+      return {
+        auth: this.auth,
+        agentVersion: this.agentVersion,
+        models: this.models,
+        canDeleteSession: this.canDeleteSession,
+        promptImages: this.promptImages
+      }
     } catch (error) {
       await this.stop()
       throw error
@@ -236,13 +274,19 @@ export class GrokAgent {
     }
   }
 
-  async prompt(text: string): Promise<{ stopReason?: string }> {
+  async prompt(parts: PromptPart[]): Promise<{ stopReason?: string }> {
     if (!this.sessionId) throw new Error('没有活动会话')
+    const prompt = parts.length ? parts : [{ type: 'text' as const, text: '' }]
     const result = (await this.requireRpc().request('session/prompt', {
       sessionId: this.sessionId,
-      prompt: [{ type: 'text', text }]
+      prompt
     })) as { stopReason?: string }
     return result
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    await this.requireRpc().request('session/delete', { sessionId }, 8000)
+    if (this.sessionId === sessionId) this.sessionId = null
   }
 
   cancel(): void {
@@ -305,6 +349,14 @@ export class GrokAgent {
         })
       })
     }
+    if (msg.method === 'fs/read_text_file') {
+      const params = (msg.params ?? {}) as { path?: string; line?: number; limit?: number }
+      return readTextFile(String(params.path ?? ''), params.line, params.limit)
+    }
+    if (msg.method === 'fs/write_text_file') {
+      const params = (msg.params ?? {}) as { path?: string; content?: string }
+      return writeTextFile(String(params.path ?? ''), String(params.content ?? ''))
+    }
     throw new Error(`未实现的客户端方法: ${msg.method}`)
   }
 
@@ -318,7 +370,12 @@ export class GrokAgent {
       return
     }
 
-    if (params.update || msg.method === 'session/update' || msg.method === '_x.ai/session/update') {
+    if (
+      params.update ||
+      msg.method === 'session/update' ||
+      msg.method === '_x.ai/session/update' ||
+      msg.method === 'x.ai/session/update'
+    ) {
       this.events.update?.({ sessionId, method: msg.method ?? 'session/update', update })
     }
   }

@@ -136,6 +136,26 @@ export function folderName(cwd: string): string {
   return parts[parts.length - 1] || cwd
 }
 
+/** Windows 下忽略斜杠与大小写差异。 */
+export function samePath(a?: string | null, b?: string | null): boolean {
+  if (!a || !b) return false
+  const n = (p: string) => p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase()
+  return n(a) === n(b)
+}
+
+export function latestSession<T extends { sessionId: string; cwd?: string; updatedAt?: string }>(
+  sessions: T[],
+  cwd?: string | null,
+  sessionId?: string | null
+): T | undefined {
+  if (sessionId) {
+    const exact = sessions.find((item) => item.sessionId === sessionId)
+    if (exact) return exact
+  }
+  const pool = cwd ? sessions.filter((item) => samePath(item.cwd, cwd)) : sessions
+  return [...pool].sort((a, b) => Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? ''))[0]
+}
+
 export function relTime(iso?: string): string {
   if (!iso) return ''
   const delta = Date.now() - new Date(iso).getTime()
