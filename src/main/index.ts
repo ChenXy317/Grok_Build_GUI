@@ -2,9 +2,16 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, screen, s
 import { existsSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { GrokAgent, resolveGrokPath, type PromptPart, type SessionSnapshot } from './acp'
-import { deleteSessionDir, readSessionUsage, renameSessionDir } from './session-disk'
-import { loadSettings, rememberWorkspace, saveSettings, type AppSettings } from './settings'
+import {
+  GrokAgent,
+  resolveGrokPath,
+  type PermissionMode,
+  type PromptPart,
+  type SessionSnapshot
+} from './acp'
+import { listFiles } from './client-fs'
+import { deleteSessionDir, readSessionPlan, readSessionUsage, renameSessionDir } from './session-disk'
+import { loadSettings, rememberPrompt, rememberWorkspace, saveSettings, type AppSettings } from './settings'
 
 let win: BrowserWindow | null = null
 let agent: GrokAgent | null = null
@@ -173,6 +180,7 @@ async function startAgent(): Promise<{
   settings: AppSettings
   canDeleteSession: boolean
   promptImages: boolean
+  contextWindow: number | null
 }> {
   const grokPath = resolveGrokPath(settings.grokPath || null)
   try {
@@ -181,10 +189,26 @@ async function startAgent(): Promise<{
       update: (payload) => send('session-update', payload),
       permission: (req) => {
         send('permission', req)
-        if (settings.yolo) return
+        if (settings.permissionMode === 'always-approve' || settings.yolo) return
         if (req.sessionId && agent?.sessionId && req.sessionId !== agent.sessionId) return
         const title = String(req.toolCall.title ?? '需要批准')
         showNotice('Grok Build', title)
+      },
+      question: (req) => {
+        send('question', req)
+        showNotice('Grok Build', '需要你回答问题')
+      },
+      elicit: (req) => {
+        send('elicit', req)
+        showNotice('Grok Build', req.serverName ? `${req.serverName} 需要输入` : 'MCP 需要输入')
+      },
+      trust: (req) => {
+        send('trust', req)
+        showNotice('Grok Build', '是否信任此项目目录？')
+      },
+      planGate: (req) => {
+        send('plan-gate', req)
+        showNotice('Grok Build', '计划已写好，等待批准')
       },
       exit: (info) => send('agent-exit', info),
       log: (line) => send('agent-log', line)
@@ -198,7 +222,8 @@ async function startAgent(): Promise<{
       models: info.models,
       settings,
       canDeleteSession: info.canDeleteSession,
-      promptImages: info.promptImages
+      promptImages: info.promptImages,
+      contextWindow: info.contextWindow
     }
   } catch (error) {
     try {
@@ -217,9 +242,21 @@ async function startAgent(): Promise<{
       models: null,
       settings,
       canDeleteSession: false,
-      promptImages: false
+      promptImages: false,
+      contextWindow: null
     }
   }
+}
+
+function permissionFlags(mode: PermissionMode | undefined, yolo?: boolean): { yolo: boolean; auto: boolean } {
+  const resolved = mode ?? (yolo ? 'always-approve' : 'ask')
+  return { yolo: resolved === 'always-approve', auto: resolved === 'auto' }
+}
+
+function syncTitle(): void {
+  if (!win || win.isDestroyed()) return
+  const folder = agent?.cwd ? agent.cwd.split(/[\\/]/).filter(Boolean).pop() : ''
+  win.setTitle(folder ? `Grok Build — ${folder}` : 'Grok Build')
 }
 
 function registerIpc(): void {
@@ -230,15 +267,18 @@ function registerIpc(): void {
     return await agent.listSessions()
   })
 
-  ipcMain.handle('new-session', async (_e, opts: { cwd: string; yolo?: boolean; model?: string }) => {
+  ipcMain.handle('new-session', async (_e, opts: { cwd: string; yolo?: boolean; auto?: boolean; model?: string }) => {
     if (!agent) throw new Error('尚未连接 agent')
+    const flags = permissionFlags(settings.permissionMode, opts.yolo ?? settings.yolo)
     const snap = await agent.newSession({
       cwd: opts.cwd,
-      yolo: opts.yolo ?? settings.yolo,
+      yolo: opts.yolo ?? flags.yolo,
+      auto: opts.auto ?? flags.auto,
       model: opts.model ?? settings.model
     })
     settings = rememberWorkspace(settings, opts.cwd, snap.sessionId)
     persist()
+    syncTitle()
     return snap
   })
 
@@ -247,11 +287,19 @@ function registerIpc(): void {
     const snap = await agent.loadSession(opts)
     settings = rememberWorkspace(settings, opts.cwd, opts.sessionId)
     persist()
+    syncTitle()
     return snap
   })
 
   ipcMain.handle('prompt', async (_e, parts: PromptPart[]) => {
     if (!agent) throw new Error('尚未连接 agent')
+    const text = Array.isArray(parts)
+      ? parts.filter((part) => part.type === 'text').map((part) => part.text).join('\n')
+      : String(parts)
+    if (text.trim()) {
+      settings = rememberPrompt(settings, text.trim())
+      persistSoon()
+    }
     return await agent.prompt(Array.isArray(parts) ? parts : [{ type: 'text', text: String(parts) }])
   })
 
@@ -270,6 +318,78 @@ function registerIpc(): void {
 
   ipcMain.handle('respond-permission', (_e, rpcId: number | string, optionId: string | null) => {
     agent?.resolvePermission(rpcId, optionId)
+  })
+
+  ipcMain.handle('respond-question', (_e, rpcId: number | string, result: unknown) => {
+    agent?.resolveExt(rpcId, result)
+  })
+
+  ipcMain.handle('respond-elicit', (_e, rpcId: number | string, result: unknown) => {
+    agent?.resolveExt(rpcId, result)
+  })
+
+  ipcMain.handle('respond-trust', (_e, rpcId: number | string, trust: boolean) => {
+    agent?.resolveExt(rpcId, { outcome: trust ? 'trust' : 'reject' })
+  })
+
+  ipcMain.handle('respond-plan-gate', (_e, rpcId: number | string, outcome: string, feedback?: string) => {
+    agent?.resolveExt(rpcId, { outcome, ...(feedback ? { feedback } : {}) })
+  })
+
+  ipcMain.handle('set-mode', async (_e, modeId: string) => {
+    if (!agent) throw new Error('尚未连接 agent')
+    return await agent.setMode(modeId)
+  })
+
+  ipcMain.handle('toggle-plan', async (_e, enabled?: boolean) => {
+    if (!agent) throw new Error('尚未连接 agent')
+    return await agent.togglePlanMode(enabled)
+  })
+
+  ipcMain.handle('compact', async (_e, context?: string) => {
+    if (!agent) throw new Error('尚未连接 agent')
+    return await agent.compactConversation(context)
+  })
+
+  ipcMain.handle('rewind-points', async () => {
+    if (!agent) throw new Error('尚未连接 agent')
+    return await agent.rewindPoints()
+  })
+
+  ipcMain.handle('rewind-execute', async (_e, index: number, restoreFiles?: boolean) => {
+    if (!agent) throw new Error('尚未连接 agent')
+    return await agent.rewindExecute(Number(index), Boolean(restoreFiles))
+  })
+
+  ipcMain.handle('prompt-history', async () => {
+    try {
+      const remote = agent ? await agent.promptHistory() : []
+      const local = settings.promptHistory ?? []
+      return [...new Set([...local, ...remote])].slice(0, 80)
+    } catch {
+      return settings.promptHistory ?? []
+    }
+  })
+
+  ipcMain.handle('fork-session', async () => {
+    if (!agent) throw new Error('尚未连接 agent')
+    const snap = await agent.forkSession()
+    settings = rememberWorkspace(settings, snap.cwd, snap.sessionId)
+    persist()
+    syncTitle()
+    return snap
+  })
+
+  ipcMain.handle('session-info', async () => {
+    if (!agent) return null
+    return await agent.sessionInfo()
+  })
+
+  ipcMain.handle('session-plan', (_e, sessionId: string) => readSessionPlan(sessionId))
+
+  ipcMain.handle('list-files', (_e, root: string, query?: string) => {
+    const dir = typeof root === 'string' && root ? root : agent?.cwd || settings.lastCwd
+    return listFiles(dir, typeof query === 'string' ? query : '')
   })
 
   ipcMain.handle('delete-session', async (_e, sessionId: string) => {
@@ -292,7 +412,12 @@ function registerIpc(): void {
     return true
   })
 
-  ipcMain.handle('rename-session', (_e, sessionId: string, title: string) => {
+  ipcMain.handle('rename-session', async (_e, sessionId: string, title: string) => {
+    try {
+      await agent?.renameSessionTitle(sessionId, title)
+    } catch {
+      /* fall back to disk */
+    }
     if (!renameSessionDir(sessionId, title)) throw new Error('无法重命名该会话')
     return true
   })
@@ -359,6 +484,11 @@ function registerIpc(): void {
 
   ipcMain.handle('set-settings', (_e, patch: Partial<AppSettings>) => {
     settings = { ...settings, ...patch }
+    if (patch.permissionMode) {
+      settings.yolo = patch.permissionMode === 'always-approve'
+    } else if (patch.yolo != null) {
+      settings.permissionMode = patch.yolo ? 'always-approve' : 'ask'
+    }
     persist()
     return settings
   })
@@ -401,6 +531,7 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     app.setName('Grok Build')
+    if (process.platform === 'win32') app.setAppUserModelId('com.grokbuild.gui')
     settingsFile = join(app.getPath('userData'), 'settings.json')
     settings = loadSettings(settingsFile, homedir())
     pendingOpenFolder = folderFromArgv(process.argv)

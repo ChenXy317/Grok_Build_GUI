@@ -13,11 +13,16 @@ export default function Composer({
   images,
   setImages,
   queue,
+  history,
+  files,
+  multiline,
   onSend,
   onStop,
   onAttach,
   onCommand,
-  onPasteFiles
+  onPasteFiles,
+  onQueueRemove,
+  onAtQuery
 }: {
   draft: string
   setDraft: (value: string) => void
@@ -28,17 +33,27 @@ export default function Composer({
   images: ImagePart[]
   setImages: (value: ImagePart[]) => void
   queue: string[]
+  history?: string[]
+  files?: string[]
+  multiline?: boolean
   onSend: () => void
   onStop: () => void
   onAttach: () => void
   onCommand: (name: string, rest: string) => boolean
   onPasteFiles?: (files: File[]) => void
+  onQueueRemove?: (index: number) => void
+  onAtQuery?: (query: string) => void
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const [active, setActive] = useState(0)
+  const [histIndex, setHistIndex] = useState(-1)
   const slash = draft.startsWith('/') && !draft.includes('\n')
+  const atMatch = draft.match(/(?:^|\s)@([^\s]*)$/)
+  const atQuery = atMatch ? atMatch[1] : ''
+  const atMode = Boolean(atMatch) && !slash
   const query = slash ? draft.slice(1) : ''
   const matches = useMemo(() => (slash ? filterCommands(commands, query.split(/\s/)[0] ?? '') : []), [commands, query, slash])
+  const fileMatches = atMode ? (files ?? []).slice(0, 10) : []
 
   useEffect(() => {
     const el = ref.current
@@ -49,7 +64,11 @@ export default function Composer({
 
   useEffect(() => {
     setActive(0)
-  }, [query])
+  }, [query, atQuery])
+
+  useEffect(() => {
+    if (atMode) onAtQuery?.(atQuery)
+  }, [atMode, atQuery, onAtQuery])
 
   const pick = (item: Command) => {
     if (item.hint) {
@@ -61,14 +80,25 @@ export default function Composer({
     else setDraft(`/${item.name} `)
   }
 
+  const pickFile = (path: string) => {
+    const chip = /\s/.test(path) ? `@"${path.replaceAll('"', '\\"')}"` : `@${path}`
+    setDraft(`${draft.replace(/@([^\s]*)$/, '')}${chip} `)
+    ref.current?.focus()
+  }
+
   return (
     <div className="composer-wrap">
       {queue.length ? (
         <div className="queue">
           {queue.map((item, i) => (
-            <span key={i} className="queue-chip" title={item}>
+            <button
+              key={i}
+              className="queue-chip"
+              title={`${item}（点击移除）`}
+              onClick={() => onQueueRemove?.(i)}
+            >
               排队 {item.slice(0, 40)}
-            </span>
+            </button>
           ))}
         </div>
       ) : null}
@@ -106,6 +136,23 @@ export default function Composer({
           }}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
+            if (atMode && fileMatches.length) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setActive((i) => (i + 1) % fileMatches.length)
+                return
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setActive((i) => (i - 1 + fileMatches.length) % fileMatches.length)
+                return
+              }
+              if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+                e.preventDefault()
+                pickFile(fileMatches[active] ?? fileMatches[0])
+                return
+              }
+            }
             if (slash && matches.length) {
               if (e.key === 'ArrowDown') {
                 e.preventDefault()
@@ -128,7 +175,22 @@ export default function Composer({
                 return
               }
             }
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.key === 'ArrowUp' && !draft && (history?.length ?? 0) > 0) {
+              e.preventDefault()
+              const next = Math.min((history?.length ?? 1) - 1, histIndex + 1)
+              setHistIndex(next)
+              setDraft(history?.[next] ?? '')
+              return
+            }
+            if (e.key === 'ArrowDown' && histIndex >= 0) {
+              e.preventDefault()
+              const next = histIndex - 1
+              setHistIndex(next)
+              setDraft(next < 0 ? '' : (history?.[next] ?? ''))
+              return
+            }
+            const sendNow = multiline ? e.key === 'Enter' && (e.ctrlKey || e.metaKey) : e.key === 'Enter' && !e.shiftKey
+            if (sendNow) {
               e.preventDefault()
               if (slash) {
                 const [name, ...rest] = draft.slice(1).trim().split(/\s+/)
@@ -137,8 +199,7 @@ export default function Composer({
                   return
                 }
               }
-              if (streaming) onSend()
-              else onSend()
+              onSend()
             }
           }}
         />
@@ -165,6 +226,22 @@ export default function Composer({
             >
               <strong>/{item.name}</strong>
               <span>{item.description}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {atMode && fileMatches.length ? (
+        <div className="slash-menu">
+          {fileMatches.map((path, i) => (
+            <button
+              key={path}
+              className={`slash-item ${i === active ? 'active' : ''}`}
+              onMouseDown={(e) => {
+                e.preventDefault()
+                pickFile(path)
+              }}
+            >
+              <strong>@{path}</strong>
             </button>
           ))}
         </div>

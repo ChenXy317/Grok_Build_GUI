@@ -1,7 +1,7 @@
 {
   "name": "grok-build-gui",
   "productName": "Grok Build",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Grok Build 桌面客户端，通过 ACP 连接本地 grok agent",
   "main": "./out/main/index.js",
   "type": "module",

@@ -20,7 +20,7 @@ export type JsonRpcMessage = {
  */
 export class JsonRpc {
   private nextId = 1
-  private pending = new Map<number, Pending>()
+  private pending = new Map<number | string, Pending>()
   private buffer = ''
   private closed = false
 
@@ -106,9 +106,11 @@ export class JsonRpc {
 
     const isResponse = msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined) && !msg.method
     if (isResponse) {
-      const pending = this.pending.get(Number(msg.id))
+      const id = msg.id as number | string
+      const pending = this.pending.get(id) ?? (typeof id === 'string' ? this.pending.get(Number(id)) : undefined)
       if (!pending) return
-      this.pending.delete(Number(msg.id))
+      this.pending.delete(id)
+      if (typeof id === 'string') this.pending.delete(Number(id))
       if (pending.timer) clearTimeout(pending.timer)
       if (msg.error) {
         const err = new Error(msg.error.message || 'ACP 错误')

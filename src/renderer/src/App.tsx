@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import Chat from './Chat'
+import Markdown from './Markdown'
+import CommandPalette, { type PaletteItem } from './CommandPalette'
 import Composer, { type ImagePart } from './Composer'
+import ElicitModal from './ElicitModal'
 import PermissionModal from './PermissionModal'
+import PlanGateModal from './PlanGateModal'
+import QuestionModal from './QuestionModal'
+import RewindModal from './RewindModal'
 import SettingsModal from './SettingsModal'
 import Sidebar from './Sidebar'
+import TrustModal from './TrustModal'
 import {
   applyHistory,
   applyUpdate,
@@ -18,12 +25,18 @@ import type {
   AppSettings,
   AuthInfo,
   ConfigOption,
+  ElicitRequest,
+  PermissionMode,
   PermissionRequest,
+  PlanGateRequest,
   PromptPart,
+  QuestionRequest,
+  RewindPoint,
   SessionInfo,
   SessionSnapshot,
   SessionUsage,
-  SlashCommand
+  SlashCommand,
+  TrustRequest
 } from '../../preload/index.d'
 
 type Phase = 'boot' | 'setup' | 'ready'
@@ -91,6 +104,8 @@ export default function App() {
   const [effort, setEffort] = useState('')
   const [effortOptions, setEffortOptions] = useState<{ value: string; name: string }[]>([])
   const [yolo, setYolo] = useState(true)
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>('always-approve')
+  const [sessionMode, setSessionMode] = useState('')
   const [showThinking, setShowThinking] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [restoring, setRestoring] = useState(false)
@@ -107,6 +122,19 @@ export default function App() {
   const [compactUi, setCompactUi] = useState(false)
   const [fontScale, setFontScale] = useState(1)
   const [promptImages, setPromptImages] = useState(false)
+  const [question, setQuestion] = useState<QuestionRequest | null>(null)
+  const [elicit, setElicit] = useState<ElicitRequest | null>(null)
+  const [trust, setTrust] = useState<TrustRequest | null>(null)
+  const [planGate, setPlanGate] = useState<PlanGateRequest | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [rewindPoints, setRewindPoints] = useState<RewindPoint[] | null>(null)
+  const [planView, setPlanView] = useState('')
+  const [infoNote, setInfoNote] = useState('')
+  const [history, setHistory] = useState<string[]>([])
+  const [fileHits, setFileHits] = useState<string[]>([])
+  const [multiline, setMultiline] = useState(false)
+  const [contextWindow, setContextWindow] = useState<number | null>(null)
+  const [retryNote, setRetryNote] = useState('')
 
   const sessionRef = useRef<string | null>(null)
   const sendingRef = useRef(false)
@@ -115,6 +143,7 @@ export default function App() {
   const sessionWaitRef = useRef<Promise<unknown> | null>(null)
   const cwdRef = useRef('')
   const yoloRef = useRef(true)
+  const permissionRef = useRef<PermissionMode>('always-approve')
   const promptImagesRef = useRef(false)
   const modelRef = useRef(model)
   const draftRef = useRef('')
@@ -126,6 +155,7 @@ export default function App() {
 
   cwdRef.current = cwd
   yoloRef.current = yolo
+  permissionRef.current = permissionMode
   promptImagesRef.current = promptImages
   modelRef.current = model
   draftRef.current = draft
@@ -164,6 +194,7 @@ export default function App() {
       const available = snap.models?.availableModels ?? []
       if (available.length) setModels(available.map((m) => ({ modelId: m.modelId, name: m.name })))
       if (snap.models?.currentModelId) setModel(snap.models.currentModelId)
+      if (snap.modes?.currentModeId) setSessionMode(snap.modes.currentModeId)
       applyConfig(snap.configOptions)
     },
     [applyConfig]
@@ -176,6 +207,12 @@ export default function App() {
     setSidebarCollapsed(Boolean(next.sidebarCollapsed))
     setCompactUi(Boolean(next.compactUi))
     setFontScale(next.fontScale || 1)
+    setMultiline(Boolean(next.multiline))
+    if (next.permissionMode) {
+      setPermissionMode(next.permissionMode)
+      setYolo(next.permissionMode === 'always-approve')
+    }
+    if (next.promptHistory) setHistory(next.promptHistory)
     return next
   }, [])
 
@@ -202,6 +239,9 @@ export default function App() {
   const abortUiTurn = useCallback(async () => {
     promptGen.current += 1
     setPermission(null)
+    setQuestion(null)
+    setElicit(null)
+    setPlanGate(null)
     setQueue([])
     queueRef.current = []
     try {
@@ -222,7 +262,12 @@ export default function App() {
       if (!nextCwd) return false
       try {
         await abortUiTurn()
-        const op = window.grok.newSession({ cwd: nextCwd, yolo: yoloRef.current, model: modelRef.current })
+        const op = window.grok.newSession({
+          cwd: nextCwd,
+          yolo: permissionRef.current === 'always-approve',
+          auto: permissionRef.current === 'auto',
+          model: modelRef.current
+        })
         sessionWaitRef.current = op
         const snap = await op
         applySnapshot(snap)
@@ -306,7 +351,11 @@ export default function App() {
       setGrokPath(result.grokPath)
       setSettings(result.settings)
       setYolo(result.settings.yolo)
+      setPermissionMode(result.settings.permissionMode ?? (result.settings.yolo ? 'always-approve' : 'ask'))
       setShowThinking(result.settings.showThinking)
+      setMultiline(Boolean(result.settings.multiline))
+      setHistory(result.settings.promptHistory ?? [])
+      setContextWindow(result.contextWindow)
       setRecentCwds(result.settings.recentCwds ?? [])
       setSidebarCollapsed(Boolean(result.settings.sidebarCollapsed))
       setCompactUi(Boolean(result.settings.compactUi))
@@ -396,6 +445,17 @@ export default function App() {
         })
         return
       }
+      if (kind === 'current_mode_update') {
+        setSessionMode(String(update.currentModeId ?? ''))
+        return
+      }
+      if (kind === 'retry_state') {
+        const attempt = Number(update.attempt ?? 0)
+        const max = Number(update.maxRetries ?? update.max_retries ?? 0)
+        setRetryNote(attempt ? `正在重试 ${attempt}${max ? `/${max}` : ''}` : '')
+        return
+      }
+      setRetryNote('')
       setBlocks((prev) => applyUpdate(prev, update))
     })
     const offPerm = window.grok.on('permission', (payload) => {
@@ -404,11 +464,36 @@ export default function App() {
         void window.grok.respondPermission(req.rpcId, null)
         return
       }
-      if (yoloRef.current) {
+      if (yoloRef.current || permissionRef.current === 'always-approve') {
         void window.grok.respondPermission(req.rpcId, allowOptionId(req))
         return
       }
       setPermission(req)
+    })
+    const offQuestion = window.grok.on('question', (payload) => {
+      const req = payload as QuestionRequest
+      if (req.sessionId && sessionRef.current && req.sessionId !== sessionRef.current) {
+        void window.grok.respondQuestion(req.rpcId, { outcome: 'cancelled' })
+        return
+      }
+      setQuestion(req)
+    })
+    const offElicit = window.grok.on('elicit', (payload) => {
+      const req = payload as ElicitRequest
+      if (req.sessionId && sessionRef.current && req.sessionId !== sessionRef.current) {
+        void window.grok.respondElicit(req.rpcId, { outcome: 'cancel' })
+        return
+      }
+      setElicit(req)
+    })
+    const offTrust = window.grok.on('trust', (payload) => setTrust(payload as TrustRequest))
+    const offPlanGate = window.grok.on('plan-gate', (payload) => {
+      const req = payload as PlanGateRequest
+      if (req.sessionId && sessionRef.current && req.sessionId !== sessionRef.current) {
+        void window.grok.respondPlanGate(req.rpcId, 'cancelled')
+        return
+      }
+      setPlanGate(req)
     })
     const offExit = window.grok.on('agent-exit', (payload) => {
       const info = payload as { code: number | null; stderr: string }
@@ -429,6 +514,10 @@ export default function App() {
     return () => {
       offUpdate()
       offPerm()
+      offQuestion()
+      offElicit()
+      offTrust()
+      offPlanGate()
       offExit()
       offLog()
       offFolder()
@@ -489,7 +578,12 @@ export default function App() {
         const existing = latestSession(list, folder)
         const op = existing?.cwd
           ? window.grok.loadSession({ sessionId: existing.sessionId, cwd: existing.cwd })
-          : window.grok.newSession({ cwd: folder, yolo: yoloRef.current, model: modelRef.current })
+          : window.grok.newSession({
+              cwd: folder,
+              yolo: permissionRef.current === 'always-approve',
+              auto: permissionRef.current === 'auto',
+              model: modelRef.current
+            })
         sessionWaitRef.current = op
         const snap = await op
         if (promptGen.current !== gen) return
@@ -591,7 +685,56 @@ export default function App() {
       return true
     }
     if (key === 'always-approve') {
-      void toggleYolo(!yoloRef.current)
+      void applyPermissionMode(permissionRef.current === 'always-approve' ? 'ask' : 'always-approve')
+      return true
+    }
+    if (key === 'auto') {
+      void applyPermissionMode(permissionRef.current === 'auto' ? 'ask' : 'auto')
+      return true
+    }
+    if (key === 'plan') {
+      void enterPlan(rest)
+      return true
+    }
+    if (key === 'view-plan' || key === 'show-plan' || key === 'plan-view') {
+      void showPlan()
+      return true
+    }
+    if (key === 'rewind' || key === 'undo') {
+      void openRewind()
+      return true
+    }
+    if (key === 'fork') {
+      void forkCurrent()
+      return true
+    }
+    if (key === 'rename' || key === 'title') {
+      if (rest && sessionRef.current) void renameCurrent(rest)
+      return true
+    }
+    if (key === 'delete') {
+      const current = sessions.find((item) => item.sessionId === sessionRef.current)
+      if (current) void deleteSession(current)
+      return true
+    }
+    if (key === 'home' || key === 'welcome') {
+      void goHome()
+      return true
+    }
+    if (key === 'session-info' || key === 'status' || key === 'info') {
+      void showSessionInfo()
+      return true
+    }
+    if (key === 'model' || key === 'm') {
+      if (rest) void changeModel(rest)
+      return true
+    }
+    if (key === 'effort') {
+      if (rest) void changeEffort(rest)
+      return true
+    }
+    if (key === 'docs' || key === 'howto' || key === 'guides') {
+      void window.grok.openExternal('https://docs.x.ai/build/overview')
       return true
     }
     if (key === 'help') {
@@ -599,11 +742,7 @@ export default function App() {
       return true
     }
     if (key === 'compact') {
-      void (async () => {
-        await abortUiTurn()
-        sendingRef.current = true
-        await sendText(`/compact${rest ? ` ${rest}` : ''}`, ++promptGen.current)
-      })()
+      void runCompact(rest)
       return true
     }
     return false
@@ -634,16 +773,174 @@ export default function App() {
   }
 
   const toggleYolo = async (value: boolean) => {
-    setYolo(value)
-    yoloRef.current = value
+    await applyPermissionMode(value ? 'always-approve' : 'ask')
+  }
+
+  const applyPermissionMode = async (mode: PermissionMode) => {
+    setPermissionMode(mode)
+    permissionRef.current = mode
+    setYolo(mode === 'always-approve')
+    yoloRef.current = mode === 'always-approve'
     try {
-      await window.grok.setSettings({ yolo: value })
-      if (value && permission) {
+      await window.grok.setSettings({ permissionMode: mode, yolo: mode === 'always-approve' })
+      if (sessionRef.current) {
+        const modeId = mode === 'always-approve' ? 'always-approve' : mode === 'auto' ? 'auto' : 'default'
+        try {
+          await window.grok.setMode(modeId)
+          setSessionMode(modeId)
+        } catch {
+          if (mode === 'ask') {
+            try {
+              await window.grok.setMode('ask')
+              setSessionMode('ask')
+            } catch {
+              /* mode ids vary by agent */
+            }
+          }
+        }
+      }
+      if (mode === 'always-approve' && permission) {
         void window.grok.respondPermission(permission.rpcId, allowOptionId(permission))
         setPermission(null)
       }
     } catch (err) {
       setError(errText(err))
+    }
+  }
+
+  const cycleMode = async () => {
+    const planOn = sessionMode === 'plan'
+    if (!planOn && permissionMode === 'ask') {
+      await enterPlan()
+      return
+    }
+    if (planOn || sessionMode === 'plan') {
+      try {
+        await window.grok.togglePlan(false)
+      } catch {
+        try {
+          await window.grok.setMode('default')
+        } catch {
+          /* ignore */
+        }
+      }
+      setSessionMode('')
+      await applyPermissionMode('auto')
+      return
+    }
+    if (permissionMode === 'auto') {
+      await applyPermissionMode('always-approve')
+      return
+    }
+    await applyPermissionMode('ask')
+  }
+
+  const enterPlan = async (rest = '') => {
+    try {
+      try {
+        await window.grok.setMode('plan')
+      } catch {
+        await window.grok.togglePlan(true)
+      }
+      setSessionMode('plan')
+      if (rest) await sendText(rest, ++promptGen.current)
+    } catch (err) {
+      setError(errText(err))
+    }
+  }
+
+  const showPlan = async () => {
+    try {
+      const md = sessionRef.current ? await window.grok.sessionPlan(sessionRef.current) : null
+      setPlanView(md?.trim() || '当前会话还没有计划文件。')
+    } catch (err) {
+      setError(errText(err))
+    }
+  }
+
+  const openRewind = async () => {
+    try {
+      const points = await window.grok.rewindPoints()
+      if (!points.length) {
+        const fromChat = blocksRef.current
+          .filter((block) => block.type === 'user')
+          .map((block, index) => ({ index, title: block.type === 'user' ? block.text : '', preview: undefined }))
+        if (!fromChat.length) {
+          setError('没有可回退的回合')
+          return
+        }
+        setRewindPoints(fromChat)
+        return
+      }
+      setRewindPoints(points)
+    } catch (err) {
+      setError(errText(err))
+    }
+  }
+
+  const forkCurrent = async () => {
+    try {
+      await abortUiTurn()
+      const snap = await window.grok.forkSession()
+      applySnapshot(snap)
+      await refreshSessions()
+      await pullSettings()
+    } catch (err) {
+      setError(errText(err))
+    }
+  }
+
+  const renameCurrent = async (title: string) => {
+    if (!sessionRef.current) return
+    try {
+      await window.grok.renameSession(sessionRef.current, title)
+      await refreshSessions()
+    } catch (err) {
+      setError(errText(err))
+    }
+  }
+
+  const goHome = async () => {
+    await abortUiTurn()
+    sessionRef.current = null
+    setSessionId(null)
+    setCwd('')
+    cwdRef.current = ''
+    setBlocks([])
+    setUsage(null)
+    setSessionMode('')
+  }
+
+  const showSessionInfo = async () => {
+    try {
+      const info = await window.grok.sessionInfo()
+      const bits = [
+        sessionRef.current ? `会话 ${sessionRef.current}` : '',
+        cwdRef.current,
+        modelRef.current,
+        usage?.totalTokens ? `${formatTokens(usage.totalTokens)} tokens` : '',
+        contextWindow ? `窗口 ${formatTokens(contextWindow)}` : ''
+      ].filter(Boolean)
+      setInfoNote(info ? JSON.stringify(info, null, 2) : bits.join('\n'))
+    } catch (err) {
+      setError(errText(err))
+    }
+  }
+
+  const runCompact = async (rest: string) => {
+    await abortUiTurn()
+    sendingRef.current = true
+    try {
+      await window.grok.compact(rest || undefined)
+      if (sessionRef.current) {
+        const list = await refreshSessions()
+        const existing = list.find((item) => item.sessionId === sessionRef.current)
+        if (existing?.cwd) await loadSession(existing)
+      }
+    } catch {
+      await sendText(`/compact${rest ? ` ${rest}` : ''}`, ++promptGen.current)
+    } finally {
+      sendingRef.current = false
     }
   }
 
@@ -653,6 +950,8 @@ export default function App() {
     if (patch.sidebarCollapsed != null) setSidebarCollapsed(patch.sidebarCollapsed)
     if (patch.compactUi != null) setCompactUi(patch.compactUi)
     if (patch.fontScale != null) setFontScale(patch.fontScale)
+    if (patch.multiline != null) setMultiline(patch.multiline)
+    if (patch.permissionMode) void applyPermissionMode(patch.permissionMode)
   }
 
   const renameSession = async (session: SessionInfo, title: string) => {
@@ -733,12 +1032,19 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey
       const key = e.key.toLowerCase()
-      if (mod && key === 'n') {
+      if (mod && key === 'p') {
+        e.preventDefault()
+        setPaletteOpen((v) => !v)
+      } else if (mod && key === 'n') {
         e.preventDefault()
         void newSession()
       } else if (mod && key === 'o') {
         e.preventDefault()
-        void openProject()
+        if (e.shiftKey) void applyPermissionMode(permissionMode === 'always-approve' ? 'ask' : 'always-approve')
+        else void openProject()
+      } else if (e.shiftKey && e.key === 'Tab' && !mod) {
+        e.preventDefault()
+        void cycleMode()
       } else if (mod && key === 'b') {
         e.preventDefault()
         void patchSettings({ sidebarCollapsed: !sidebarCollapsed })
@@ -759,6 +1065,9 @@ export default function App() {
         setLogsOpen((v) => !v)
       } else if (e.key === 'Escape') {
         if (settingsOpen) setSettingsOpen(false)
+        else if (paletteOpen) setPaletteOpen(false)
+        else if (rewindPoints) setRewindPoints(null)
+        else if (planView) setPlanView('')
         else if (logsOpen) setLogsOpen(false)
         else if (findOpen) {
           setFindOpen(false)
@@ -768,7 +1077,43 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [abortUiTurn, exportChat, findOpen, logsOpen, newSession, openProject, settingsOpen, sidebarCollapsed, streaming])
+  }, [
+    abortUiTurn,
+    applyPermissionMode,
+    cycleMode,
+    exportChat,
+    findOpen,
+    logsOpen,
+    newSession,
+    openProject,
+    paletteOpen,
+    permissionMode,
+    planView,
+    rewindPoints,
+    settingsOpen,
+    sidebarCollapsed,
+    streaming
+  ])
+
+  const paletteItems: PaletteItem[] = useMemo(
+    () => [
+      { id: 'new', label: '新会话', hint: 'Ctrl+N', run: () => void newSession() },
+      { id: 'open', label: '打开项目', hint: 'Ctrl+O', run: () => void openProject() },
+      { id: 'settings', label: '设置', hint: 'Ctrl+,', run: () => setSettingsOpen(true) },
+      { id: 'export', label: '导出对话', hint: 'Ctrl+E', run: () => void exportChat() },
+      { id: 'find', label: '查找', hint: 'Ctrl+F', run: () => setFindOpen(true) },
+      { id: 'yolo', label: '切换始终批准', hint: 'Ctrl+Shift+O', run: () => void toggleYolo(!yolo) },
+      { id: 'mode', label: '切换模式', hint: 'Shift+Tab', run: () => void cycleMode() },
+      { id: 'plan', label: '计划模式', run: () => void enterPlan() },
+      { id: 'compact', label: '压缩上下文', run: () => void runCompact('') },
+      { id: 'rewind', label: '回退回合', run: () => void openRewind() },
+      { id: 'fork', label: '分叉会话', run: () => void forkCurrent() },
+      { id: 'info', label: '会话信息', run: () => void showSessionInfo() },
+      { id: 'docs', label: '打开文档', run: () => void window.grok.openExternal('https://docs.x.ai/build/overview') },
+      { id: 'logs', label: 'Agent 日志', hint: 'Ctrl+`', run: () => setLogsOpen((v) => !v) }
+    ],
+    [cycleMode, exportChat, newSession, openProject, yolo]
+  )
 
   const headerCwd = useMemo(() => (cwd ? folderName(cwd) : '桌面客户端'), [cwd])
   const grokPickLabel = window.grok.platform === 'win32' ? '选择 grok.exe' : '选择 grok'
@@ -858,6 +1203,7 @@ export default function App() {
           onOpenRecent={(path) => void openWorkspace(path)}
           onRename={(s, title) => void renameSession(s, title)}
           onDelete={(s) => void deleteSession(s)}
+          onFork={() => void forkCurrent()}
           onToggle={() => void patchSettings({ sidebarCollapsed: !sidebarCollapsed })}
         />
         <main className="main">
@@ -894,10 +1240,13 @@ export default function App() {
                 </select>
               </label>
             ) : null}
-            <label className="check" title="工具调用不再弹窗确认，当前会话立即生效">
-              <input type="checkbox" checked={yolo} onChange={(e) => void toggleYolo(e.target.checked)} />
-              始终批准
-            </label>
+            <button
+              className={`mode-chip ${permissionMode} ${sessionMode === 'plan' ? 'plan' : ''}`}
+              title="Shift+Tab 切换模式"
+              onClick={() => void cycleMode()}
+            >
+              {sessionMode === 'plan' ? '计划' : permissionMode === 'always-approve' ? '始终批准' : permissionMode === 'auto' ? '自动' : '询问'}
+            </button>
           </div>
           {disconnected ? (
             <div className="error-banner">
@@ -910,6 +1259,14 @@ export default function App() {
             <div className="error-banner">
               <span>{error}</span>
               <button className="ghost" onClick={() => setError('')}>
+                关闭
+              </button>
+            </div>
+          ) : null}
+          {infoNote ? (
+            <div className="info-banner">
+              <pre>{infoNote}</pre>
+              <button className="ghost" onClick={() => setInfoNote('')}>
                 关闭
               </button>
             </div>
@@ -934,6 +1291,7 @@ export default function App() {
             showThinking={showThinking}
             find={find}
             stopReason={stopReason}
+            statusHint={retryNote}
             empty={
               <EmptyState
                 cwd={cwd}
@@ -948,11 +1306,19 @@ export default function App() {
             draft={draft}
             setDraft={setDraft}
             streaming={streaming}
-            disabled={restoring || Boolean(permission) || disconnected}
+            disabled={restoring || Boolean(permission || question || elicit || trust || planGate) || disconnected}
             commands={commands}
             images={images}
             setImages={setImages}
             queue={queue}
+            history={history}
+            files={fileHits}
+            multiline={multiline}
+            onQueueRemove={(index) => setQueue((prev) => prev.filter((_, i) => i !== index))}
+            onAtQuery={(query) => {
+              if (!cwdRef.current) return
+              void window.grok.listFiles(cwdRef.current, query).then(setFileHits)
+            }}
             placeholder={
               cwd
                 ? promptImages
@@ -971,7 +1337,14 @@ export default function App() {
             <span>{auth?.subscription_tier ?? ''}</span>
             <span>{agentVersion ? `agent ${agentVersion}` : ''}</span>
             <span>{sessionId ? sessionId.slice(0, 8) : '无会话'}</span>
-            {usage?.totalTokens ? <span>{formatTokens(usage.totalTokens)} tokens</span> : null}
+            {usage?.totalTokens ? (
+              <span>
+                {formatTokens(usage.totalTokens)}
+                {contextWindow ? ` / ${formatTokens(contextWindow)}` : ''} tokens
+                {contextWindow ? `（${Math.min(100, Math.round((usage.totalTokens / contextWindow) * 100))}%）` : ''}
+              </span>
+            ) : null}
+            {sessionMode ? <span>{sessionMode}</span> : null}
             {usage?.turnCount ? <span>{usage.turnCount} 轮</span> : null}
             {disconnected ? <span className="danger-text">已断开</span> : null}
           </footer>
@@ -988,6 +1361,113 @@ export default function App() {
           </aside>
         ) : null}
       </div>
+      {question ? (
+        <QuestionModal
+          request={question}
+          onSubmit={(answers, annotations) => {
+            void window.grok.respondQuestion(question.rpcId, { outcome: 'accepted', answers, annotations })
+            setQuestion(null)
+          }}
+          onCancel={() => {
+            void window.grok.respondQuestion(question.rpcId, { outcome: 'cancelled' })
+            setQuestion(null)
+          }}
+          onChat={(partial) => {
+            void window.grok.respondQuestion(question.rpcId, { outcome: 'chat_about_this', partial_answers: partial })
+            setQuestion(null)
+          }}
+          onSkip={(partial) => {
+            void window.grok.respondQuestion(question.rpcId, { outcome: 'skip_interview', partial_answers: partial })
+            setQuestion(null)
+          }}
+        />
+      ) : null}
+      {elicit ? (
+        <ElicitModal
+          request={elicit}
+          onAccept={(content) => {
+            void window.grok.respondElicit(elicit.rpcId, { outcome: 'accept', content })
+            setElicit(null)
+          }}
+          onDecline={() => {
+            void window.grok.respondElicit(elicit.rpcId, { outcome: 'decline' })
+            setElicit(null)
+          }}
+          onCancel={() => {
+            void window.grok.respondElicit(elicit.rpcId, { outcome: 'cancel' })
+            setElicit(null)
+          }}
+        />
+      ) : null}
+      {trust ? (
+        <TrustModal
+          request={trust}
+          onTrust={() => {
+            void window.grok.respondTrust(trust.rpcId, true)
+            setTrust(null)
+          }}
+          onReject={() => {
+            void window.grok.respondTrust(trust.rpcId, false)
+            setTrust(null)
+          }}
+        />
+      ) : null}
+      {planGate ? (
+        <PlanGateModal
+          request={planGate}
+          onApprove={() => {
+            void window.grok.respondPlanGate(planGate.rpcId, 'approved')
+            setPlanGate(null)
+            setSessionMode('')
+          }}
+          onRevise={(feedback) => {
+            void window.grok.respondPlanGate(planGate.rpcId, 'cancelled', feedback)
+            setPlanGate(null)
+          }}
+          onQuit={() => {
+            void window.grok.respondPlanGate(planGate.rpcId, 'abandoned')
+            setPlanGate(null)
+            setSessionMode('')
+          }}
+        />
+      ) : null}
+      {rewindPoints ? (
+        <RewindModal
+          points={rewindPoints}
+          onClose={() => setRewindPoints(null)}
+          onPick={(index) => {
+            void (async () => {
+              try {
+                await abortUiTurn()
+                await window.grok.rewindExecute(index, false)
+                const list = await refreshSessions()
+                const existing = list.find((item) => item.sessionId === sessionRef.current)
+                if (existing?.cwd) await loadSession(existing)
+              } catch (err) {
+                setError(errText(err))
+              } finally {
+                setRewindPoints(null)
+              }
+            })()
+          }}
+        />
+      ) : null}
+      {planView ? (
+        <div className="modal-backdrop" onClick={() => setPlanView('')}>
+          <div className="modal wide plan-gate" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-kicker">当前计划</div>
+            <div className="plan-preview">
+              <Markdown text={planView} />
+            </div>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setPlanView('')}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {paletteOpen ? <CommandPalette items={paletteItems} onClose={() => setPaletteOpen(false)} /> : null}
       {permission ? (
         <PermissionModal
           request={permission}

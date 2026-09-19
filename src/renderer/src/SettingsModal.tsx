@@ -37,9 +37,28 @@ export default function SettingsModal({
             {grokPickLabel}
           </button>
         </div>
+        <label className="field">
+          权限模式
+          <select
+            value={settings.permissionMode ?? (yolo ? 'always-approve' : 'ask')}
+            onChange={(e) => onPatch({ permissionMode: e.target.value as AppSettings['permissionMode'] })}
+          >
+            <option value="ask">询问</option>
+            <option value="auto">自动</option>
+            <option value="always-approve">始终批准</option>
+          </select>
+        </label>
         <label className="check">
           <input type="checkbox" checked={yolo} onChange={(e) => onYolo(e.target.checked)} />
           始终批准工具调用
+        </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={settings.multiline}
+            onChange={(e) => onPatch({ multiline: e.target.checked })}
+          />
+          多行输入（Ctrl+Enter 发送）
         </label>
         <label className="check">
           <input type="checkbox" checked={showThinking} onChange={(e) => onShowThinking(e.target.checked)} />
@@ -77,6 +96,9 @@ export default function SettingsModal({
           </p>
           <p>
             <kbd>Ctrl+L</kbd> 聚焦输入　<kbd>Esc</kbd> 停止 / 关闭
+          </p>
+          <p>
+            <kbd>Ctrl+P</kbd> 命令面板　<kbd>Shift+Tab</kbd> 切换模式　<kbd>@</kbd> 提及文件
           </p>
         </div>
         <p className="hint">同一会话请不要同时在 TUI 和本 GUI 中打开。命令行可传入项目目录。</p>

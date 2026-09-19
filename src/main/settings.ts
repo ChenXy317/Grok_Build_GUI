@@ -9,17 +9,23 @@ export type WindowBounds = {
   isMaximized?: boolean
 }
 
+export type PermissionMode = 'ask' | 'auto' | 'always-approve'
+
 export type AppSettings = {
   grokPath: string
   lastCwd: string
   lastSessionId: string
   recentCwds: string[]
   yolo: boolean
+  permissionMode: PermissionMode
   showThinking: boolean
   model?: string
   sidebarCollapsed: boolean
   compactUi: boolean
   fontScale: number
+  multiline: boolean
+  timestamps: boolean
+  promptHistory: string[]
   windowBounds?: WindowBounds
 }
 
@@ -29,10 +35,14 @@ const defaults = (): AppSettings => ({
   lastSessionId: '',
   recentCwds: [],
   yolo: true,
+  permissionMode: 'always-approve',
   showThinking: true,
   sidebarCollapsed: false,
   compactUi: false,
-  fontScale: 1
+  fontScale: 1,
+  multiline: false,
+  timestamps: false,
+  promptHistory: []
 })
 
 function asString(value: unknown): string {
@@ -52,6 +62,10 @@ export function loadSettings(file: string, _home?: string): AppSettings {
       ? raw.recentCwds.filter((item): item is string => typeof item === 'string' && item.length > 0)
       : []
     const fontScale = Math.min(1.4, Math.max(0.85, asNumber(raw.fontScale, 1)))
+    const permissionMode = normalizePermissionMode(raw.permissionMode, raw.yolo)
+    const promptHistory = Array.isArray(raw.promptHistory)
+      ? raw.promptHistory.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, 80)
+      : []
     return {
       ...base,
       ...raw,
@@ -59,9 +73,14 @@ export function loadSettings(file: string, _home?: string): AppSettings {
       lastCwd: asString(raw.lastCwd),
       lastSessionId: asString(raw.lastSessionId),
       recentCwds,
+      yolo: permissionMode === 'always-approve',
+      permissionMode,
       sidebarCollapsed: Boolean(raw.sidebarCollapsed),
       compactUi: Boolean(raw.compactUi),
-      fontScale
+      fontScale,
+      multiline: Boolean(raw.multiline),
+      timestamps: Boolean(raw.timestamps),
+      promptHistory
     }
   } catch {
     return base
@@ -71,6 +90,19 @@ export function loadSettings(file: string, _home?: string): AppSettings {
 export function saveSettings(file: string, settings: AppSettings): void {
   mkdirSync(dirname(file), { recursive: true })
   writeFileSync(file, JSON.stringify(settings, null, 2), 'utf8')
+}
+
+function normalizePermissionMode(value: unknown, yolo?: unknown): PermissionMode {
+  if (value === 'ask' || value === 'auto' || value === 'always-approve') return value
+  return yolo === false ? 'ask' : 'always-approve'
+}
+
+/** 记住一条已发送的提示，供上箭头召回。 */
+export function rememberPrompt(settings: AppSettings, text: string): AppSettings {
+  const next = text.trim()
+  if (!next) return settings
+  const promptHistory = [next, ...settings.promptHistory.filter((item) => item !== next)].slice(0, 80)
+  return { ...settings, promptHistory }
 }
 
 function samePath(a: string, b: string): boolean {

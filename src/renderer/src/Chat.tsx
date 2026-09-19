@@ -116,7 +116,8 @@ export default function Chat({
   empty,
   showThinking,
   find,
-  stopReason
+  stopReason,
+  statusHint
 }: {
   blocks: Block[]
   streaming: boolean
@@ -125,6 +126,7 @@ export default function Chat({
   showThinking: boolean
   find?: string
   stopReason?: string
+  statusHint?: string
 }) {
   const endRef = useRef<HTMLDivElement>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
@@ -209,7 +211,7 @@ export default function Chat({
         return <ToolCard key={block.id} block={block} />
       })}
       {restoring && blocks.length > 0 ? <div className="typing">正在恢复上次会话…</div> : null}
-      {streaming ? <div className="typing">Grok 正在工作…</div> : null}
+      {streaming ? <div className="typing">{statusHint || 'Grok 正在工作…'}</div> : null}
       {stopReason && stopReason !== 'end_turn' ? <div className="muted stop-reason">停止：{stopReason}</div> : null}
       <div ref={endRef} />
     </div>

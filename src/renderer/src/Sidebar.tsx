@@ -16,6 +16,7 @@ export default function Sidebar({
   onOpenRecent,
   onRename,
   onDelete,
+  onFork,
   onToggle
 }: {
   sessions: SessionInfo[]
@@ -31,6 +32,7 @@ export default function Sidebar({
   onOpenRecent: (path: string) => void
   onRename: (session: SessionInfo, title: string) => void
   onDelete: (session: SessionInfo) => void
+  onFork?: (session: SessionInfo) => void
   onToggle: () => void
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number; session: SessionInfo } | null>(null)
@@ -160,6 +162,16 @@ export default function Sidebar({
               }}
             >
               打开目录
+            </button>
+          ) : null}
+          {onFork && menu.session.sessionId === sessionId ? (
+            <button
+              onClick={() => {
+                onFork(menu.session)
+                setMenu(null)
+              }}
+            >
+              分叉会话
             </button>
           ) : null}
           <button

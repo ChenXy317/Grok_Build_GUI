@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 const MAX_READ = 400_000
 const MAX_WRITE = 8_000_000
@@ -43,6 +43,51 @@ export function readTextFile(path: string, line?: number, limit?: number): { con
   }
   if (content.length > MAX_READ) content = `${content.slice(0, MAX_READ)}\n…（已截断）`
   return { content }
+}
+
+const SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'dist',
+  'out',
+  'build',
+  '.next',
+  'coverage',
+  '__pycache__',
+  '.venv',
+  'target',
+  '.cache'
+])
+
+/** 在项目目录内按文件名模糊查找，供 @ 提及。 */
+export function listFiles(root: string, query = '', limit = 40): string[] {
+  if (!root || !existsSync(root) || !statSync(root).isDirectory()) return []
+  const q = query.trim().toLowerCase()
+  const out: string[] = []
+  const walk = (dir: string, depth: number): void => {
+    if (out.length >= limit || depth > 5) return
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (out.length >= limit) return
+      if (entry.name.startsWith('.') && entry.name !== '.grok') continue
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name)) continue
+        walk(full, depth + 1)
+        continue
+      }
+      if (!entry.isFile()) continue
+      const rel = relative(root, full).replaceAll('\\', '/')
+      if (!q || rel.toLowerCase().includes(q) || entry.name.toLowerCase().includes(q)) out.push(rel)
+    }
+  }
+  walk(root, 0)
+  return out
 }
 
 /** ACP fs/write_text_file：仅允许写入会话 cwd / GROK_HOME。 */

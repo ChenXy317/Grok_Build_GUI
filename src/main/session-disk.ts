@@ -82,6 +82,19 @@ export type SessionUsage = {
   modelCalls?: number
 }
 
+/** 读取会话 plan.md。 */
+export function readSessionPlan(sessionId: string): string | null {
+  const dir = findSessionDir(sessionId)
+  if (!dir) return null
+  const file = join(dir, 'plan.md')
+  if (!existsSync(file)) return null
+  try {
+    return readFileSync(file, 'utf8')
+  } catch {
+    return null
+  }
+}
+
 /** 读取会话 usage.json。 */
 export function readSessionUsage(sessionId: string): SessionUsage | null {
   const dir = findSessionDir(sessionId)

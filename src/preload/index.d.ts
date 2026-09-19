@@ -3,10 +3,18 @@ import type {
   ConfigOption,
   SessionInfo,
   SessionSnapshot,
+  SessionMode,
   AuthInfo,
   PermissionRequest,
   PromptPart,
-  SlashCommand
+  SlashCommand,
+  QuestionRequest,
+  UserQuestion,
+  ElicitRequest,
+  TrustRequest,
+  PlanGateRequest,
+  RewindPoint,
+  PermissionMode
 } from '../main/acp'
 import type { SessionUsage } from '../main/session-disk'
 
@@ -20,18 +28,33 @@ export type StartResult = {
   settings: AppSettings
   canDeleteSession: boolean
   promptImages: boolean
+  contextWindow: number | null
 }
 
 export type GrokAPI = {
   platform: NodeJS.Platform
   start: () => Promise<StartResult>
   listSessions: () => Promise<SessionInfo[]>
-  newSession: (opts: { cwd: string; yolo?: boolean; model?: string }) => Promise<SessionSnapshot>
+  newSession: (opts: { cwd: string; yolo?: boolean; auto?: boolean; model?: string }) => Promise<SessionSnapshot>
   loadSession: (opts: { sessionId: string; cwd: string }) => Promise<SessionSnapshot>
   prompt: (parts: PromptPart[]) => Promise<{ stopReason?: string }>
   cancel: () => Promise<void>
   setConfig: (configId: string, value: string) => Promise<unknown>
   respondPermission: (rpcId: number | string, optionId: string | null) => Promise<void>
+  respondQuestion: (rpcId: number | string, result: unknown) => Promise<void>
+  respondElicit: (rpcId: number | string, result: unknown) => Promise<void>
+  respondTrust: (rpcId: number | string, trust: boolean) => Promise<void>
+  respondPlanGate: (rpcId: number | string, outcome: string, feedback?: string) => Promise<void>
+  setMode: (modeId: string) => Promise<unknown>
+  togglePlan: (enabled?: boolean) => Promise<unknown>
+  compact: (context?: string) => Promise<unknown>
+  rewindPoints: () => Promise<RewindPoint[]>
+  rewindExecute: (index: number, restoreFiles?: boolean) => Promise<unknown>
+  promptHistory: () => Promise<string[]>
+  forkSession: () => Promise<SessionSnapshot>
+  sessionInfo: () => Promise<Record<string, unknown> | null>
+  sessionPlan: (sessionId: string) => Promise<string | null>
+  listFiles: (root: string, query?: string) => Promise<string[]>
   deleteSession: (sessionId: string) => Promise<boolean>
   renameSession: (sessionId: string, title: string) => Promise<boolean>
   sessionUsage: (sessionId: string) => Promise<SessionUsage | null>
@@ -67,5 +90,13 @@ export type {
   PermissionRequest,
   PromptPart,
   SlashCommand,
-  SessionUsage
+  SessionUsage,
+  SessionMode,
+  QuestionRequest,
+  UserQuestion,
+  ElicitRequest,
+  TrustRequest,
+  PlanGateRequest,
+  RewindPoint,
+  PermissionMode
 }
