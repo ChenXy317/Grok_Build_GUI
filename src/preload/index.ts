@@ -80,4 +80,9 @@ const api = {
   }
 }
 
-contextBridge.exposeInMainWorld('grok', api)
+try {
+  contextBridge.exposeInMainWorld('grok', api)
+} catch (error) {
+  console.error('expose grok failed', error)
+  throw error
+}

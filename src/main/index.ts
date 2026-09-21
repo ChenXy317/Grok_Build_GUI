@@ -86,8 +86,12 @@ function folderFromArgv(argv: string[]): string | null {
 }
 
 function preloadPath(): string {
-  const mjs = join(__dirname, '../preload/index.mjs')
-  return existsSync(mjs) ? mjs : join(__dirname, '../preload/index.js')
+  const dir = join(__dirname, '../preload')
+  for (const name of ['index.cjs', 'index.js', 'index.mjs']) {
+    const file = join(dir, name)
+    if (existsSync(file)) return file
+  }
+  return join(dir, 'index.cjs')
 }
 
 function visibleBounds(): { x?: number; y?: number; width: number; height: number; isMaximized?: boolean } {
@@ -126,7 +130,7 @@ function createWindow(): void {
     minHeight: 560,
     backgroundColor: '#0c0c0f',
     title: 'Grok Build',
-    show: false,
+    show: true,
     autoHideMenuBar: true,
     titleBarStyle: 'hidden',
     titleBarOverlay: {
@@ -144,13 +148,22 @@ function createWindow(): void {
 
   if (bounds.isMaximized) win.maximize()
   trackWindow(win)
-  win.on('ready-to-show', () => win?.show())
   win.on('closed', () => {
     win = null
   })
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isSafeExternalUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  win.webContents.on('preload-error', (_event, file, error) => {
+    void dialog.showErrorBox('预加载失败', `${file}\n${error.message}`)
+  })
+  win.webContents.on('did-fail-load', (_event, code, desc, url) => {
+    if (code === -3) return
+    void dialog.showErrorBox('页面加载失败', `${desc} (${code})\n${url}`)
+  })
+  win.webContents.on('render-process-gone', (_event, details) => {
+    void dialog.showErrorBox('渲染进程退出', `${details.reason}: ${details.exitCode}`)
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {

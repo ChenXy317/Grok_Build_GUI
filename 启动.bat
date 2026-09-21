@@ -52,5 +52,6 @@ if not exist "%ELECTRON%" (
   )
 )
 
+echo 正在启动客户端...
 start "" "%ELECTRON%" "%cd%" -- %*
 exit /b 0

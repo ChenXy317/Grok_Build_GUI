@@ -1116,9 +1116,9 @@ export default function App() {
   )
 
   const headerCwd = useMemo(() => (cwd ? folderName(cwd) : '桌面客户端'), [cwd])
-  const grokPickLabel = window.grok.platform === 'win32' ? '选择 grok.exe' : '选择 grok'
+  const grokPickLabel = window.grok?.platform === 'win32' ? '选择 grok.exe' : '选择 grok'
   const installHint =
-    window.grok.platform === 'win32'
+    window.grok?.platform === 'win32'
       ? '若尚未安装 CLI，可在 PowerShell 执行：irm https://x.ai/cli/install.ps1 | iex'
       : '若尚未安装 CLI：curl -fsSL https://x.ai/cli/install.sh | bash'
   const sessionTitle = sessions.find((item) => item.sessionId === sessionId)?.title
